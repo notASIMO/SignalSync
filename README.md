@@ -18,15 +18,15 @@ To build a continuous-action Reinforcement Learning agent (PPO/SAC) that dynamic
 
 ### Phase 2: The Network Simulator / Gym Environment (Status: 0%)
 *This is the core of the simulation required for the bonus.*
-- [ ] Define the State (`S`), Action (`A`), and Reward (`R`) mathematically in code.
-- [ ] Implement the `__init__`, `reset`, and `step` functions in `network_env.py`.
+- [x] Define the State (`S`), Action (`A`), and Reward (`R`) mathematically in code.
+- [x] Implement the `__init__`, `reset`, and `step` functions in `network_env.py`.
 - [ ] Build a "Token Bucket" pacing mechanism to simulate network socket buffers.
 - [ ] Implement a Markov Chain generator to simulate bursty packet loss and jitter spikes.
 - [ ] **Test:** Ensure `env.step()` runs 10,000 random actions without crashing or throwing infinite values.
 
 ### Phase 3: RL Agent Implementation (Status: 0%)
-- [ ] Set up `stable-baselines3` integration in `train.py`.
-- [ ] Implement Proximal Policy Optimization (PPO) configured for continuous action spaces.
+- [x] Set up `stable-baselines3` integration in `train.py`.
+- [x] Implement Proximal Policy Optimization (PPO) configured for continuous action spaces.
 - [ ] Set up TensorBoard logging to track reward curves, agent latency, and packet loss over time.
 - [ ] Train the initial agent (baseline model).
 
