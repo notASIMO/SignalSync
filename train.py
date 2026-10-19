@@ -23,8 +23,8 @@ def train():
         tensorboard_log="./logs/"
     )
 
-    print("Training PPO Agent for 20,000 steps...")
-    model.learn(total_timesteps=20000)
+    print("Training PPO Agent for 50,000 steps...")
+    model.learn(total_timesteps=50000)
 
     model_path = "models/ppo_signalsync"
     model.save(model_path)

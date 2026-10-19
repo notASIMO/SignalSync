@@ -5,7 +5,7 @@
 To build a continuous-action Reinforcement Learning agent (PPO/SAC) that dynamically adjusts Forward Error Correction (FEC) and packet pacing to optimize ultra-low latency multiplayer gaming environments over congested, stochastic networks.
 
 ## 📈 Overall Progress
-**Phase:** 1 / 6 | **Completion:** 5%
+**Phase:** 4 / 7 | **Completion:** 65%
 
 ---
 
@@ -16,25 +16,25 @@ To build a continuous-action Reinforcement Learning agent (PPO/SAC) that dynamic
 - [x] Initialize private GitHub repository.
 - [x] Define overarching architecture and set up this master execution plan.
 
-### Phase 2: The Network Simulator / Gym Environment (Status: 60%)
+### Phase 2: The Network Simulator / Gym Environment (Status: 100%)
 *This is the core of the simulation required for the bonus.*
 - [x] Define the State (`S`), Action (`A`), and Reward (`R`) mathematically in code.
 - [x] Implement the `__init__`, `reset`, and `step` functions in `network_env.py`.
 - [x] Build a "Token Bucket" pacing mechanism to simulate network socket buffers.
-- [ ] Implement a Markov Chain generator to simulate bursty packet loss and jitter spikes.
-- [ ] **Test:** Ensure `env.step()` runs 10,000 random actions without crashing or throwing infinite values.
+- [x] Implement a Markov Chain generator to simulate bursty packet loss and jitter spikes.
+- [x] **Test:** Ensure `env.step()` runs 10,000 random actions without crashing or throwing infinite values.
 
-### Phase 3: RL Agent Implementation (Status: 40%)
+### Phase 3: RL Agent Implementation (Status: 100%)
 - [x] Set up `stable-baselines3` integration in `train.py`.
 - [x] Implement Proximal Policy Optimization (PPO) configured for continuous action spaces.
-- [ ] Set up TensorBoard logging to track reward curves, agent latency, and packet loss over time.
-- [ ] Train the initial agent (baseline model).
+- [x] Set up TensorBoard logging to track reward curves, agent latency, and packet loss over time.
+- [x] Train the initial agent (baseline model).
 
-### Phase 4: Benchmarking & Baselines (Status: 0%)
+### Phase 4: Benchmarking & Baselines (Status: 75%)
 *To prove the RL agent is actually smart, we must compare it to standard protocols.*
-- [ ] Write a "Naive UDP" baseline (action: always pace 0ms, FEC 0).
-- [ ] Write a "Simple AIMD" baseline (Additive Increase, Multiplicative Decrease - similar to TCP Reno).
-- [ ] Run evaluation scripts to compare the RL Agent vs. UDP vs. AIMD over 100 episodes.
+- [x] Write a "Naive UDP" baseline (action: always pace 0ms, FEC 0).
+- [x] Write a "Simple AIMD" baseline (Additive Increase, Multiplicative Decrease - similar to TCP Reno).
+- [x] Run evaluation scripts to compare the RL Agent vs. UDP vs. AIMD over 100 episodes.
 - [ ] Generate comparative plots (Latency vs. Throughput) and save to `/results/`.
 
 ### Phase 5: The Visualizer Demo (Status: 0%)
