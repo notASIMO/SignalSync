@@ -5,7 +5,7 @@
 To build a continuous-action Reinforcement Learning agent (PPO/SAC) that dynamically adjusts Forward Error Correction (FEC) and packet pacing to optimize ultra-low latency multiplayer gaming environments over congested, stochastic networks.
 
 ## 📈 Overall Progress
-**Phase:** 4 / 7 | **Completion:** 65%
+**Phase:** 4 / 7 | **Completion:** 70%
 
 ---
 
@@ -30,12 +30,12 @@ To build a continuous-action Reinforcement Learning agent (PPO/SAC) that dynamic
 - [x] Set up TensorBoard logging to track reward curves, agent latency, and packet loss over time.
 - [x] Train the initial agent (baseline model).
 
-### Phase 4: Benchmarking & Baselines (Status: 75%)
+### Phase 4: Benchmarking & Baselines (Status: 100%)
 *To prove the RL agent is actually smart, we must compare it to standard protocols.*
 - [x] Write a "Naive UDP" baseline (action: always pace 0ms, FEC 0).
 - [x] Write a "Simple AIMD" baseline (Additive Increase, Multiplicative Decrease - similar to TCP Reno).
 - [x] Run evaluation scripts to compare the RL Agent vs. UDP vs. AIMD over 100 episodes.
-- [ ] Generate comparative plots (Latency vs. Throughput) and save to `/results/`.
+- [x] Generate comparative plots (Latency vs. Throughput) and save to `/results/`.
 
 ### Phase 5: The Visualizer Demo (Status: 0%)
 *Crucial for the resume and presentation.*
