@@ -5,7 +5,7 @@
 To build a continuous-action Reinforcement Learning agent (PPO/SAC) that dynamically adjusts Forward Error Correction (FEC) and packet pacing to optimize ultra-low latency multiplayer gaming environments over congested, stochastic networks.
 
 ## 📈 Overall Progress
-**Phase:** 4 / 7 | **Completion:** 70%
+**Phase:** 5 / 7 | **Completion:** 80%
 
 ---
 
@@ -35,12 +35,12 @@ To build a continuous-action Reinforcement Learning agent (PPO/SAC) that dynamic
 - [x] Write a "Naive UDP" baseline (action: always pace 0ms, FEC 0).
 - [x] Write a "Simple AIMD" baseline (Additive Increase, Multiplicative Decrease - similar to TCP Reno).
 - [x] Run evaluation scripts to compare the RL Agent vs. UDP vs. AIMD over 100 episodes.
-- [x] Generate comparative plots (Latency vs. Throughput) and save to `/results/`.
+- [x] Write `plot_results.py` to collect statistical metrics and generate comparative plots (Latency vs. Throughput) to save to `/results/`.
 
-### Phase 5: The Visualizer Demo (Status: 0%)
+### Phase 5: The Visualizer Demo (Status: 75%)
 *Crucial for the resume and presentation.*
-- [ ] Write `simulate_gui.py` using Pygame or Matplotlib to visualize the network queue in real-time.
-- [ ] Add live metrics to the GUI (Current RTT, Buffer Level, Agent Action).
+- [x] Write `simulate_gui.py` using Matplotlib to visualize the network queue in real-time.
+- [x] Add live metrics to the GUI (Current RTT, Buffer Level, Agent Action, Policy Toggle).
 - [ ] Record a GIF of the RL agent successfully recovering from a network congestion spike.
 - [ ] Embed the GIF in this README.
 
@@ -49,7 +49,7 @@ To build a continuous-action Reinforcement Learning agent (PPO/SAC) that dynamic
 - [ ] Draft Section 1: Abstract & Real-World Problem Mapping.
 - [ ] Draft Section 2: Mathematical Formulation (MDP, State, Action, Reward).
 - [ ] Draft Section 3: Environment Dynamics (How the network queue is simulated).
-- [ ] Draft Section 4: Results & Baseline Comparisons (Include TensorBoard/Matplotlib graphs).
+- [ ] Draft Section 4: Results & Baseline Comparisons (Include TensorBoard/Matplotlib graphs from `plot_results.py`).
 - [ ] Final proofread against the plagiarism and rubric requirements.
 
 ### Phase 7: Delivery & Final Polish (Status: 0%)
