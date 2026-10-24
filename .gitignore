@@ -1,0 +1,18 @@
+﻿# Python Bytecode & Environments
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# IDE / Editor Settings
+.vscode/
+.idea/
+
+# RL Training Logs & Generated Files
+logs/
+results/*.png
+models/*.zip
+
+# OS Artifacts
+.DS_Store
+Thumbs.db
