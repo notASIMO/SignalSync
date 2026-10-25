@@ -39,12 +39,12 @@ To build a continuous-action Reinforcement Learning agent (PPO/SAC) that dynamic
 - [x] Run evaluation scripts to compare the RL Agent vs. UDP vs. AIMD over 100 episodes.
 - [x] Write `plot_results.py` to collect statistical metrics and generate comparative plots (Latency vs. Throughput) to save to `/results/`.
 
-### Phase 5: The Visualizer Demo (Status: 75%)
+### Phase 5: The Visualizer Demo (Status: 100%)
 *Crucial for the resume and presentation.*
 - [x] Write `simulate_gui.py` using Matplotlib to visualize the network queue in real-time.
 - [x] Add live metrics to the GUI (Current RTT, Buffer Level, Agent Action, Policy Toggle).
-- [ ] Record a GIF of the RL agent successfully recovering from a network congestion spike.
-- [ ] Embed the GIF in this README.
+- [x] Record a GIF of the RL agent successfully recovering from a network congestion spike.
+- [x] Embed the GIF in this README.
 
 ### Phase 6: The Overleaf Report (Status: 0%)
 *Strict 2-page limit, two-column format.*
