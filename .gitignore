@@ -10,8 +10,6 @@ __pycache__/
 
 # RL Training Logs & Generated Files
 logs/
-results/*.png
-models/*.zip
 
 # OS Artifacts
 .DS_Store
