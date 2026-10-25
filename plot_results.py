@@ -113,17 +113,33 @@ def main():
         ax.set_title(title, fontsize=11, fontweight="bold")
         ax.grid(axis="y", linestyle="--", alpha=0.5)
 
-        for bar, mean in zip(bars, means):
-            y_pos = bar.get_height()
-            offset = -0.08 * abs(y_pos) if y_pos < 0 else 0.03 * max(means)
+        # Pad y-axis limits by 18% so text labels never hit the border or x-axis labels
+        if min(means) < 0:
+            lowest_point = min(m - s for m, s in zip(means, stds))
+            ax.set_ylim(lowest_point * 1.18, 0)
+            span = abs(lowest_point)
+        else:
+            highest_point = max(m + s for m, s in zip(means, stds))
+            ax.set_ylim(0, highest_point * 1.18)
+            span = highest_point
+
+        # Place label cleanly beyond the error bar tip (mean +/- std)
+        for bar, mean, std in zip(bars, means, stds):
+            if mean < 0:
+                y_pos = (mean - std) - (0.03 * span)
+                va_align = "top"
+            else:
+                y_pos = (mean + std) + (0.02 * span)
+                va_align = "bottom"
+
             ax.text(
                 bar.get_x() + bar.get_width() / 2.0,
-                y_pos + offset,
+                y_pos,
                 f"{mean:.1f}",
                 ha="center",
-                va="bottom" if y_pos >= 0 else "top",
+                va=va_align,
                 fontweight="bold",
-                fontsize=9,
+                fontsize=9.5,
             )
 
     plt.tight_layout(rect=[0, 0, 1, 0.95])
@@ -148,7 +164,7 @@ def main():
         axes[2].plot(steps, trace["fps"], label=name, color=color, linewidth=1.8)
 
     axes[0].set_ylabel("RTT Latency (ms)", fontweight="bold")
-    axes[0].legend(loc="upper right")
+    axes[0].legend(loc="upper right", frameon=True, facecolor="white", framealpha=0.9)
     axes[0].grid(True, linestyle="--", alpha=0.5)
 
     axes[1].set_ylabel("Effective Loss (%)", fontweight="bold")
