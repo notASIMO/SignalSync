@@ -2,9 +2,6 @@
 
 A Gymnasium simulator of a lossy, bursty game-traffic link, and a PPO agent that tunes **forward error correction (FEC) redundancy** and **packet pacing** in real time. The agent is benchmarked against a grid-searched constant policy and an AIMD-style heuristic on identical, seeded networks.
 
-<video src="results/signalsync_demo.mp4" autoplay loop muted playsinline width="100%"></video>
-*Live dashboard: the PPO controller, the tuned constant policy and an AIMD-style heuristic running on the same simulated link. The Burst button forces a congestion event.*
-
 ## Results
 
 All policies run on the **same 100 seeded episodes** (seeds 100-199, 200 steps each). Every policy sees the identical Good/Bad channel sequence for a given seed. Intervals are 95% confidence intervals.
