@@ -82,7 +82,22 @@ def test_action_decoding_ranges():
     for fec, delay in [(0.15, 4.5), (0.3, 9.0)]:
         back = SignalSyncEnv.decode_action(SignalSyncEnv.encode_action(fec, delay))
         assert np.allclose(back, (fec, delay), atol=1e-5)
- 
+
+
+def test_scaled_policy_applies_obs_scale():
+    import os
+    import pytest
+    pytest.importorskip("stable_baselines3")
+    from baselines import MODEL_PATH, OBS_SCALE, load_ppo
+    if not os.path.exists(MODEL_PATH):
+        pytest.skip("no trained model")
+    from stable_baselines3 import PPO
+    raw = PPO.load(MODEL_PATH)
+    obs = np.array([30.0, 5.0, 0.02, 10.0, 58.0], dtype=np.float32)
+    expected, _ = raw.predict(obs / OBS_SCALE, deterministic=True)
+    got, _ = load_ppo().predict(obs, deterministic=True)
+    assert np.allclose(expected, got)
+    
  
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

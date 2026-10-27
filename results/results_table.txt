@@ -1,5 +1,6 @@
-Policy                                                 Reward    RTT ms   Loss %     FPS
-Fixed (naive)                                 -1380.1 +/-  50.5     183.5    23.88    45.7
-Fixed (tuned 0.25/6.25ms)                      -247.7 +/-  45.4      28.8     3.23    58.1
-AIMD                                           -479.9 +/-  71.9      42.7     3.41    46.6
-SignalSync (PPO)                               -236.6 +/-  49.9      30.2     2.94    57.6
+Policy                                        Reward +/- 95% CI    RTT ms   Loss %     FPS
+Fixed (naive)                                 -1367.2 +/-   8.7     182.9    23.49    45.9
+Fixed (tuned 0.25/6.25ms)                      -236.1 +/-   7.9      28.2     2.90    58.3
+AIMD                                           -458.5 +/-  13.0      43.3     3.09    47.7
+SignalSync (PPO)                               -224.9 +/-   8.6      29.4     2.71    57.8
+Paired PPO minus tuned-constant reward: +11.3 (95% CI +/-1.1); PPO better in 97/100 episodes

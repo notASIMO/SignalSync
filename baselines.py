@@ -8,7 +8,7 @@ from network_env import SignalSyncEnv as NetworkEnv
  
 NAIVE_FEC, NAIVE_DELAY = 0.15, 4.5
 # separate seed sets so tuning and model selection never touch the test episodes
-EVAL_SEEDS = list(range(100, 130))
+EVAL_SEEDS = list(range(100, 200))
 TUNE_SEEDS = list(range(1000, 1008))
 VAL_SEEDS = list(range(2000, 2030))
 MODEL_PATH = "models/ppo_signalsync.zip"
@@ -91,8 +91,11 @@ def run_episode(env, agent, seed, is_sb3=False):
 def evaluate_policy(agent, is_sb3=False, seeds=EVAL_SEEDS):
     env = NetworkEnv()
     eps = [run_episode(env, agent, s, is_sb3) for s in seeds]
-    return {k: (float(np.mean([e[k] for e in eps])), float(np.std([e[k] for e in eps])))
-            for k in eps[0]}
+    out = {k: (float(np.mean([e[k] for e in eps])),
+               float(1.96 * np.std([e[k] for e in eps], ddof=1) / np.sqrt(len(eps))))
+           for k in eps[0]}
+    out["episode_rewards"] = np.array([e["reward"] for e in eps])
+    return out
  
  
 # grid search over constant (fec, delay), scored on the tuning seeds only
@@ -127,7 +130,7 @@ def get_tuned_fixed(force=False):
  
 def print_result(name, res):
     print(f"[{name}] {len(EVAL_SEEDS)} seeded episodes:")
-    print(f"   Mean Episode Reward : {res['reward'][0]:.1f} +/- {res['reward'][1]:.1f}")
+    print(f"   Mean Episode Reward : {res['reward'][0]:.1f} (95% CI +/- {res['reward'][1]:.1f})")
     print(f"   Avg RTT             : {res['rtt'][0]:.1f} ms")
     print(f"   Avg Effective Loss  : {res['loss'][0]:.2f} %")
     print(f"   Avg Render FPS      : {res['fps'][0]:.1f}\n")

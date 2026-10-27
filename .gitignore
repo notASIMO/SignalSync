@@ -1,16 +1,11 @@
-﻿# Python Bytecode & Environments
 __pycache__/
 *.pyc
-*.pyo
-*.pyd
-
-# IDE / Editor Settings
+.venv/
+venv/
 .vscode/
 .idea/
-
-# RL Training Logs & Generated Files
 logs/
-
-# OS Artifacts
+models/*_seed*.zip
+results/*.monitor.csv
 .DS_Store
 Thumbs.db
