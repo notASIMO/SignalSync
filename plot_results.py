@@ -74,16 +74,22 @@ def main():
     results = {n: evaluate_policy(a, is_sb3=s) for n, a, s, _ in agents}
  
     # results table for the report
-    lines = [f"{'Policy':44s} {'Reward':>16s} {'RTT ms':>9s} {'Loss %':>8s} {'FPS':>7s}"]
+    lines = [f"{'Policy':44s} {'Reward +/- 95% CI':>18s} {'RTT ms':>9s} {'Loss %':>8s} {'FPS':>7s}"]
     for n, r in results.items():
         lines.append(f"{n:44s} {r['reward'][0]:8.1f} +/- {r['reward'][1]:5.1f} "
                      f"{r['rtt'][0]:9.1f} {r['loss'][0]:8.2f} {r['fps'][0]:7.1f}")
+    if "SignalSync (PPO)" in results:
+        ref = next(n for n in results if n.startswith("Fixed (tuned"))
+        d = results["SignalSync (PPO)"]["episode_rewards"] - results[ref]["episode_rewards"]
+        se = d.std(ddof=1) / np.sqrt(len(d))
+        lines.append(f"Paired PPO minus tuned-constant reward: {d.mean():+.1f} "
+                     f"(95% CI +/-{1.96 * se:.1f}); PPO better in {(d > 0).sum()}/{len(d)} episodes")
     table = "\n".join(lines)
     print("\n" + table)
     open("results/results_table.txt", "w").write(table + "\n")
  
     fig, axes = plt.subplots(2, 2, figsize=(13, 8), dpi=300)
-    fig.suptitle(f"SignalSync vs. baselines ({len(EVAL_SEEDS)} seeded episodes, same networks)",
+    fig.suptitle(f"SignalSync vs. baselines ({len(EVAL_SEEDS)} seeded episodes, same networks, error bars = 95% CI)",
                  fontsize=14, fontweight="bold")
     cfg = [("reward", "Mean Episode Reward (higher is better)", axes[0, 0]),
            ("rtt", "Average RTT in ms (lower is better)", axes[0, 1]),
