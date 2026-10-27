@@ -1,87 +1,89 @@
 import json
-import os
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlparse
-import numpy as np
-from stable_baselines3 import PPO
+
 from network_env import SignalSyncEnv
-from baselines import FixedPacingBaseline, AIMDBaseline
+from baselines import AIMDBaseline, FixedPacingBaseline, get_tuned_fixed, load_ppo
+
+SEED = 42
+
 
 class SimulationManager:
     def __init__(self):
-        self.env_ppo = SignalSyncEnv(max_steps=100000)
-        self.env_udp = SignalSyncEnv(max_steps=100000)
-        self.env_aimd = SignalSyncEnv(max_steps=100000)
-
-        model_path = "models/ppo_signalsync.zip"
-        self.ppo_model = PPO.load(model_path) if os.path.exists(model_path) else None
-        self.udp_agent = FixedPacingBaseline(fec_rate=0.15, pacing_delay=4.5)
-        self.aimd_agent = AIMDBaseline()
+        self.envs = {n: SignalSyncEnv(max_steps=100000) for n in ("ppo", "tuned", "udp", "aimd")}
+        self.ppo_model = load_ppo()
+        self.agents = {
+            "tuned": get_tuned_fixed(),
+            "udp": FixedPacingBaseline(),
+            "aimd": AIMDBaseline(),
+        }
         self.burst_lock = 0
         self.reset()
 
     def reset(self):
-        self.obs_ppo, _ = self.env_ppo.reset(seed=42)
-        self.obs_udp, _ = self.env_udp.reset(seed=42)
-        self.obs_aimd, _ = self.env_aimd.reset(seed=42)
+        self.obs = {n: env.reset(seed=SEED)[0] for n, env in self.envs.items()}
+        for env in self.envs.values():
+            env.channel.p_bg = 0.20
+        for agent in self.agents.values():
+            agent.reset()
         self.step_count = 0
         self.burst_lock = 0
 
     def trigger_congestion(self):
-        self.burst_lock = 40  
+        self.burst_lock = 35  # Lock all channels in BAD state (1) for 35 ticks (~5 seconds)
+        for env in self.envs.values():
+            env.channel.current_state = 1
+            env.channel.p_bg = 0.0
 
     def step(self, manual_mode=False, manual_fec=0.2, manual_delay=6.0):
         self.step_count += 1
 
-        # Pre-step lock: Force channel into BAD state safely (handles int or string)
+        # Maintain burst lock without modifying network_env.py's per-tick RNG seeding
         if self.burst_lock > 0:
-            bad_val = 1 if isinstance(self.env_ppo.channel.current_state, int) else 'BAD'
-            self.env_ppo.channel.current_state = bad_val
-            self.env_udp.channel.current_state = bad_val
-            self.env_aimd.channel.current_state = bad_val
+            for env in self.envs.values():
+                env.channel.current_state = 1
+                env.channel.p_bg = 0.0
             self.burst_lock -= 1
-
-        rng_state = np.random.get_state()
+        else:
+            for env in self.envs.values():
+                env.channel.p_bg = 0.20
 
         if manual_mode or self.ppo_model is None:
             action_ppo = SignalSyncEnv.encode_action(manual_fec, manual_delay)
         else:
-            action_ppo, _ = self.ppo_model.predict(self.obs_ppo, deterministic=True)
+            action_ppo, _ = self.ppo_model.predict(self.obs["ppo"], deterministic=True)
 
         fec_ppo, delay_ppo = SignalSyncEnv.decode_action(action_ppo)
-        self.obs_ppo, rew_ppo, _, _, _ = self.env_ppo.step(action_ppo)
+        self.obs["ppo"], rew_ppo, _, _, _ = self.envs["ppo"].step(action_ppo)
+        markov_state = int(self.envs["ppo"].channel.current_state)
 
-        np.random.set_state(rng_state)
-        action_udp = self.udp_agent.predict(self.obs_udp)
-        self.obs_udp, rew_udp, _, _, _ = self.env_udp.step(action_udp)
+        rews = {}
+        for name, agent in self.agents.items():
+            self.obs[name], rews[name], _, _, _ = self.envs[name].step(agent.predict(self.obs[name]))
 
-        np.random.set_state(rng_state)
-        action_aimd = self.aimd_agent.predict(self.obs_aimd)
-        self.obs_aimd, rew_aimd, _, _, _ = self.env_aimd.step(action_aimd)
-
-        # Post-step lock: Re-enforce BAD state so Markov math doesn't instantly recover
-        if self.burst_lock > 0:
-            bad_val = 1 if isinstance(self.env_ppo.channel.current_state, int) else 'BAD'
-            self.env_ppo.channel.current_state = bad_val
-            self.env_udp.channel.current_state = bad_val
-            self.env_aimd.channel.current_state = bad_val
-            markov_state = 1
-        else:
-            markov_state = 1 if self.env_ppo.channel.current_state in [1, 'BAD'] else 0
-
+        obs_ppo = self.obs["ppo"]
         if manual_mode:
             orb_state = "listening"
-            orb_label = "MANUAL OVERRIDE ACTIVE — Monitoring user pacing parameters"
+            orb_label = f"MANUAL OVERRIDE ACTIVE — User set FEC={fec_ppo*100:.0f}%, Delay={delay_ppo:.1f}ms"
         elif markov_state == 1:
             orb_state = "solving"
-            orb_label = "SOLVING CONGESTION BURST — Boosting FEC shield & pacing delay"
-        elif self.obs_ppo[3] > 15.0:
+            orb_label = f"SOLVING CONGESTION BURST — Agent set FEC={fec_ppo*100:.1f}%, Delay={delay_ppo:.2f}ms"
+        elif obs_ppo[3] > 15.0:
             orb_state = "searching"
-            orb_label = "DRAINING SOCKET BUFFER — Scanning optimal queue equilibrium"
+            orb_label = f"DRAINING SOCKET BUFFER ({obs_ppo[3]:.1f} pkts) — Pacing at {delay_ppo:.2f}ms"
         else:
             orb_state = "working"
-            orb_label = "OPTIMAL PACING LOCKED — Ultra-low latency 60 FPS stream"
+            orb_label = f"OPTIMAL PACING LOCKED — Delay={delay_ppo:.2f}ms, FEC={fec_ppo*100:.1f}%"
+
+        def snap(obs, rew):
+            return {
+                "rtt": round(float(obs[0]), 1),
+                "loss": round(float(obs[2] * 100.0), 1),
+                "buffer": round(float(obs[3]), 1),
+                "fps": round(float(obs[4]), 1),
+                "reward": round(float(rew), 2),
+            }
 
         return {
             "step": self.step_count,
@@ -89,28 +91,16 @@ class SimulationManager:
             "orb_state": orb_state,
             "orb_label": orb_label,
             "ppo": {
-                "rtt": round(float(self.obs_ppo[0]), 1),
-                "jitter": round(float(self.obs_ppo[1]), 1),
-                "loss": round(float(self.obs_ppo[2] * 100.0), 1),
-                "buffer": round(float(self.obs_ppo[3]), 1),
-                "fps": round(float(self.obs_ppo[4]), 1),
+                **snap(obs_ppo, rew_ppo),
+                "jitter": round(float(obs_ppo[1]), 1),
                 "fec": round(float(fec_ppo * 100.0), 1),
                 "delay": round(float(delay_ppo), 2),
-                "reward": round(float(rew_ppo), 2),
             },
-            "udp": {
-                "rtt": round(float(self.obs_udp[0]), 1),
-                "loss": round(float(self.obs_udp[2] * 100.0), 1),
-                "buffer": round(float(self.obs_udp[3]), 1),
-                "fps": round(float(self.obs_udp[4]), 1),
-            },
-            "aimd": {
-                "rtt": round(float(self.obs_aimd[0]), 1),
-                "loss": round(float(self.obs_aimd[2] * 100.0), 1),
-                "buffer": round(float(self.obs_aimd[3]), 1),
-                "fps": round(float(self.obs_aimd[4]), 1),
-            },
+            "tuned": snap(self.obs["tuned"], rews["tuned"]),
+            "udp": snap(self.obs["udp"], rews["udp"]),
+            "aimd": snap(self.obs["aimd"], rews["aimd"]),
         }
+
 
 SIM = SimulationManager()
 
@@ -118,9 +108,9 @@ HTML_PAGE = """<!DOCTYPE html>
 <html lang="en" class="dark">
 <head>
 <meta charset="UTF-8">
-<title>SignalSync — Originkit & Thinking Orbs RL Telemetry</title>
+<title>SignalSync — Live RL Network Telemetry</title>
 <script src="https://cdn.tailwindcss.com"></script>
-<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap');
   body {
@@ -164,7 +154,7 @@ HTML_PAGE = """<!DOCTYPE html>
         <div class="flex items-center gap-2.5">
           <h1 class="text-xl font-bold tracking-tight text-white">SignalSync RL</h1>
           <span id="orbModeBadge" class="px-2.5 py-0.5 text-xs font-semibold rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 mono">ORB: WORKING</span>
-          <span id="linkStateBadge" class="px-2.5 py-0.5 text-xs font-semibold rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 mono">LINK: GOOD</span>
+          <span id="linkStateBadge" class="px-2.5 py-0.5 text-xs font-semibold rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 mono">LINK: HEALTHY (GOOD)</span>
         </div>
         <p id="orbStatusText" class="text-xs text-slate-400 mt-1 mono">OPTIMAL PACING LOCKED — Ultra-low latency 60 FPS stream</p>
       </div>
@@ -172,34 +162,35 @@ HTML_PAGE = """<!DOCTYPE html>
 
     <div class="flex flex-wrap items-center gap-3">
       <button id="btnPlayPause" onclick="togglePlay()" class="px-4 py-2 rounded-xl text-xs font-semibold bg-emerald-500 hover:bg-emerald-400 text-black transition">
-        ⏸ Pause
+        &#9208; Pause
       </button>
       <button onclick="injectBurst()" class="px-4 py-2 rounded-xl text-xs font-semibold bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 transition">
-        ⚡ Inject Markov Burst
+        &#9889; Inject Markov Burst
       </button>
       <button onclick="resetSim()" class="px-3.5 py-2 rounded-xl text-xs font-semibold bg-white/5 hover:bg-white/10 text-slate-300 border border-white/10 transition">
-        ↺ Reset
+        &#8634; Reset
       </button>
     </div>
   </header>
 
   <main class="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-12 gap-5">
     <div class="lg:col-span-4 flex flex-col gap-5">
-      
-      <!-- Originkit Particle Tunnel with 3D Router Orb -->
+
+      <!-- Particle Tunnel with 3D Revolving Router Orb -->
       <div class="bento-card p-4">
         <div class="flex items-center justify-between mb-2">
-          <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">Originkit Particle Tunnel (Packet Stream)</span>
+          <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">Packet Stream &amp; Router Orb</span>
           <span id="stepCounter" class="text-xs mono text-sky-400">Step #0</span>
         </div>
         <canvas id="particleTunnel" width="380" height="150" class="w-full rounded-xl bg-black/70 border border-white/5"></canvas>
         <div class="flex justify-between text-[11px] text-slate-400 mt-2 mono">
-          <span>🔵 Base Frame</span>
-          <span>🟢 FEC Shield</span>
-          <span>🔴 Markov Drop</span>
+          <span>&#128309; Base Frame</span>
+          <span>&#128994; FEC Shield</span>
+          <span>&#128308; Markov Drop</span>
         </div>
       </div>
 
+      <!-- 4-Way Queue Comparison Bars -->
       <div class="bento-card p-4">
         <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">Socket Buffer Occupancy (Max 100 pkts)</span>
         <div class="mt-3 space-y-3">
@@ -212,18 +203,30 @@ HTML_PAGE = """<!DOCTYPE html>
               <div id="bufPpoBar" class="h-full bg-gradient-to-r from-emerald-500 to-teal-400 transition-all duration-150" style="width: 0%"></div>
             </div>
           </div>
+
           <div>
             <div class="flex justify-between text-xs mb-1 mono">
-              <span class="text-amber-400 font-semibold">AIMD Control (TCP)</span>
+              <span class="text-sky-400 font-semibold">Fixed (tuned)</span>
+              <span id="bufTunedText">0.0 pkts</span>
+            </div>
+            <div class="w-full h-3 bg-white/5 rounded-full overflow-hidden">
+              <div id="bufTunedBar" class="h-full bg-sky-500 transition-all duration-150" style="width: 0%"></div>
+            </div>
+          </div>
+
+          <div>
+            <div class="flex justify-between text-xs mb-1 mono">
+              <span class="text-amber-400 font-semibold">AIMD Heuristic</span>
               <span id="bufAimdText">0.0 pkts</span>
             </div>
             <div class="w-full h-3 bg-white/5 rounded-full overflow-hidden">
               <div id="bufAimdBar" class="h-full bg-amber-500 transition-all duration-150" style="width: 0%"></div>
             </div>
           </div>
+
           <div>
             <div class="flex justify-between text-xs mb-1 mono">
-              <span class="text-rose-400 font-semibold">Fixed Pacing (UDP)</span>
+              <span class="text-rose-400 font-semibold">Fixed (naive)</span>
               <span id="bufUdpText">0.0 pkts</span>
             </div>
             <div class="w-full h-3 bg-white/5 rounded-full overflow-hidden">
@@ -233,6 +236,7 @@ HTML_PAGE = """<!DOCTYPE html>
         </div>
       </div>
 
+      <!-- Continuous Action Sliders -->
       <div class="bento-card p-4">
         <div class="flex items-center justify-between mb-3">
           <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">Agent Continuous Actions</span>
@@ -252,35 +256,36 @@ HTML_PAGE = """<!DOCTYPE html>
           <div>
             <div class="flex justify-between text-xs mono mb-1">
               <span>Pacing Delay Interval</span>
-              <span id="delayValText" class="text-purple-400 font-bold">6.50 ms</span>
+              <span id="delayValText" class="text-purple-400 font-bold">6.25 ms</span>
             </div>
-            <input type="range" id="delaySlider" min="3.5" max="14.0" step="0.1" value="6.5" disabled class="w-full accent-purple-400">
+            <input type="range" id="delaySlider" min="3.5" max="14.0" step="0.1" value="6.25" disabled class="w-full accent-purple-400">
           </div>
         </div>
       </div>
     </div>
 
+    <!-- Right Column: KPIs & Charts -->
     <div class="lg:col-span-8 flex flex-col gap-5">
       <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <div class="bento-card p-3.5">
           <div class="text-[11px] text-slate-400 uppercase">PPO Latency (RTT)</div>
           <div id="kpiRtt" class="text-2xl font-bold text-emerald-400 mono mt-1">20.0 ms</div>
-          <div id="kpiRttSub" class="text-[11px] text-slate-500 mono mt-0.5">UDP: 20.0 ms</div>
+          <div id="kpiRttSub" class="text-[11px] text-slate-500 mono mt-0.5">Tuned: 20.0 ms</div>
         </div>
         <div class="bento-card p-3.5">
           <div class="text-[11px] text-slate-400 uppercase">Effective Loss</div>
           <div id="kpiLoss" class="text-2xl font-bold text-sky-400 mono mt-1">0.0 %</div>
-          <div id="kpiLossSub" class="text-[11px] text-slate-500 mono mt-0.5">UDP: 0.0 %</div>
+          <div id="kpiLossSub" class="text-[11px] text-slate-500 mono mt-0.5">Tuned: 0.0 %</div>
         </div>
         <div class="bento-card p-3.5">
           <div class="text-[11px] text-slate-400 uppercase">Client Render FPS</div>
           <div id="kpiFps" class="text-2xl font-bold text-indigo-400 mono mt-1">60.0 FPS</div>
-          <div id="kpiFpsSub" class="text-[11px] text-slate-500 mono mt-0.5">UDP: 60.0 FPS</div>
+          <div id="kpiFpsSub" class="text-[11px] text-slate-500 mono mt-0.5">Tuned: 60.0 FPS</div>
         </div>
         <div class="bento-card p-3.5">
           <div class="text-[11px] text-slate-400 uppercase">Step Reward</div>
           <div id="kpiReward" class="text-2xl font-bold text-amber-400 mono mt-1">-0.52</div>
-          <div class="text-[11px] text-slate-500 mono mt-0.5">Target: > -1.5</div>
+          <div id="kpiRewardSub" class="text-[11px] text-slate-500 mono mt-0.5">Tuned: -0.52</div>
         </div>
       </div>
 
@@ -328,12 +333,12 @@ function drawHeaderOrb(time) {
     const py = cy + yRot * radius * scale;
     const dotRadius = Math.max(0.9, 2.3 * scale);
     const alpha = Math.min(1, Math.max(0.18, (zRot + 1.2) / 2.2));
-    
+
     let rgb = '52, 211, 153';
     if (currentOrbState === 'solving') rgb = '251, 113, 133';
     else if (currentOrbState === 'searching') rgb = '251, 191, 36';
     else if (currentOrbState === 'listening') rgb = '192, 132, 252';
-    
+
     orbCtx.beginPath();
     orbCtx.arc(px, py, dotRadius, 0, Math.PI * 2);
     orbCtx.fillStyle = `rgba(${rgb}, ${alpha})`;
@@ -347,9 +352,8 @@ requestAnimationFrame(drawHeaderOrb);
 const tunnelCanvas = document.getElementById('particleTunnel');
 const tCtx = tunnelCanvas.getContext('2d');
 let packets = [];
-let latestState = { ppo: { fec: 15, delay: 6.5, loss: 0, buffer: 0 }, markov_bad: 0 };
+let latestState = { ppo: { fec: 15, delay: 6.25, loss: 0, buffer: 0 }, markov_bad: 0 };
 
-// Setup Central 3D Orb dots
 const centralOrbDots = [];
 for (let i = 0; i < 60; i++) {
   const phi = Math.acos(1 - 2 * (i + 0.5) / 60);
@@ -379,16 +383,14 @@ function drawParticleTunnel(time) {
 
   const isBursting = latestState.markov_bad === 1;
   const fecRadiusBoost = (latestState.ppo.fec / 100.0) * 20;
-  const cx = 190; 
+  const cx = 190;
   const cy = tunnelCanvas.height / 2;
   const baseRadius = 48 + fecRadiusBoost;
 
-  // Draw 3D Central Router Orb
+  // Draw 3D Revolving Router Orb
   centralOrbDots.forEach((d, idx) => {
     let phi = d.phi;
     let theta = d.theta + t;
-    
-    // Agitate orb when bursting
     if (isBursting) {
       theta += Math.sin(t * 3.5 + idx) * 0.65;
       phi += Math.cos(t * 2.5 + idx * 0.5) * 0.25;
@@ -397,47 +399,46 @@ function drawParticleTunnel(time) {
     const x3d = Math.sin(phi) * Math.cos(theta);
     const y3d = Math.cos(phi);
     const z3d = Math.sin(phi) * Math.sin(theta);
-    
+
     const tilt = 0.35;
     const yRot = y3d * Math.cos(tilt) - z3d * Math.sin(tilt);
     const zRot = y3d * Math.sin(tilt) + z3d * Math.cos(tilt);
-    
+
     const scale = (zRot + 2.2) / 3.2;
     const px = cx + x3d * baseRadius * scale;
     const py = cy + yRot * baseRadius * scale;
     const dotRadius = Math.max(1.5, 2.8 * scale);
     const alpha = Math.min(1, Math.max(0.2, (zRot + 1.2) / 2.2));
-    
-    // Emerald green for Good state, Rose red for Bad state
+
     const rgb = isBursting ? '244, 63, 94' : '52, 211, 153';
-    
+
     tCtx.beginPath();
     tCtx.arc(px, py, dotRadius, 0, Math.PI * 2);
     tCtx.fillStyle = `rgba(${rgb}, ${alpha})`;
     tCtx.shadowBlur = 8;
     tCtx.shadowColor = `rgba(${rgb}, ${alpha})`;
     tCtx.fill();
-    tCtx.shadowBlur = 0; 
+    tCtx.shadowBlur = 0;
   });
 
   // Draw Streaming Packets
   for (let i = packets.length - 1; i >= 0; i--) {
     const p = packets[i];
     p.x += p.vx;
-    
+
     if (p.isDropped && p.x > cx) {
-      p.y += 3.5; // Packet falls down after hitting the center of the orb
+      p.y += 3.5;
       tCtx.fillStyle = '#f43f5e';
     } else if (p.isFec) {
       tCtx.fillStyle = '#34d399';
     } else {
       tCtx.fillStyle = '#38bdf8';
     }
-    
+
     tCtx.beginPath();
     tCtx.arc(p.x, p.y, 3.2, 0, Math.PI * 2);
     tCtx.fill();
-    
+
     if (p.x > tunnelCanvas.width || p.y > tunnelCanvas.height) {
       packets.splice(i, 1);
     }
@@ -446,7 +447,7 @@ function drawParticleTunnel(time) {
 }
 requestAnimationFrame(drawParticleTunnel);
 
-// --- 3. CHARTS & POLLING ---
+// --- 3. 4-WAY STREAMING CHARTS ---
 function createChart(canvasId, label, yMax) {
   return new Chart(document.getElementById(canvasId), {
     type: 'line',
@@ -454,8 +455,9 @@ function createChart(canvasId, label, yMax) {
       labels: [],
       datasets: [
         { label: 'SignalSync PPO', data: [], borderColor: '#34d399', borderWidth: 2, pointRadius: 0, tension: 0.3 },
-        { label: 'AIMD (TCP)', data: [], borderColor: '#fbbf24', borderWidth: 1.5, pointRadius: 0, tension: 0.3 },
-        { label: 'Fixed (UDP)', data: [], borderColor: '#f43f5e', borderDash: [4, 4], borderWidth: 1.5, pointRadius: 0, tension: 0.3 }
+        { label: 'Fixed (tuned)', data: [], borderColor: '#38bdf8', borderWidth: 1.5, pointRadius: 0, tension: 0.3 },
+        { label: 'AIMD Heuristic', data: [], borderColor: '#fbbf24', borderWidth: 1.5, pointRadius: 0, tension: 0.3 },
+        { label: 'Fixed (naive)', data: [], borderColor: '#f43f5e', borderDash: [4, 4], borderWidth: 1.5, pointRadius: 0, tension: 0.3 }
       ]
     },
     options: {
@@ -480,20 +482,24 @@ const fpsChart = createChart('fpsChart', 'Client Render Frame Rate (FPS) — Hig
 let isPlaying = true;
 function togglePlay() {
   isPlaying = !isPlaying;
-  document.getElementById('btnPlayPause').innerText = isPlaying ? '⏸ Pause' : '▶ Resume';
+  document.getElementById('btnPlayPause').innerHTML = isPlaying ? '&#9208; Pause' : '&#9654; Resume';
 }
 function toggleManual() {
   const manual = document.getElementById('manualToggle').checked;
   document.getElementById('fecSlider').disabled = !manual;
   document.getElementById('delaySlider').disabled = !manual;
 }
-async function injectBurst() { await fetch('/api/burst'); }
+async function injectBurst() {
+  await fetch('/api/burst', { method: 'POST' });
+}
 async function resetSim() {
-  await fetch('/api/reset');
-  rttChart.data.labels = []; fpsChart.data.labels = [];
+  await fetch('/api/reset', { method: 'POST' });
+  rttChart.data.labels = [];
+  fpsChart.data.labels = [];
   rttChart.data.datasets.forEach(d => d.data = []);
   fpsChart.data.datasets.forEach(d => d.data = []);
-  rttChart.update(); fpsChart.update();
+  rttChart.update();
+  fpsChart.update();
 }
 
 async function pollStep() {
@@ -503,6 +509,7 @@ async function pollStep() {
   const delay = document.getElementById('delaySlider').value;
 
   const res = await fetch(`/api/step?manual=${manual}&fec=${fec}&delay=${delay}`);
+  if (!res.ok) return;
   const data = await res.json();
   latestState = data;
   spawnPackets();
@@ -522,8 +529,11 @@ async function pollStep() {
   }
 
   document.getElementById('stepCounter').innerText = `Step #${data.step}`;
+
   document.getElementById('bufPpoText').innerText = `${data.ppo.buffer} pkts`;
   document.getElementById('bufPpoBar').style.width = `${Math.min(100, data.ppo.buffer)}%`;
+  document.getElementById('bufTunedText').innerText = `${data.tuned.buffer} pkts`;
+  document.getElementById('bufTunedBar').style.width = `${Math.min(100, data.tuned.buffer)}%`;
   document.getElementById('bufAimdText').innerText = `${data.aimd.buffer} pkts`;
   document.getElementById('bufAimdBar').style.width = `${Math.min(100, data.aimd.buffer)}%`;
   document.getElementById('bufUdpText').innerText = `${data.udp.buffer} pkts`;
@@ -537,36 +547,46 @@ async function pollStep() {
   document.getElementById('delayValText').innerText = `${data.ppo.delay} ms`;
 
   document.getElementById('kpiRtt').innerText = `${data.ppo.rtt} ms`;
-  document.getElementById('kpiRttSub').innerText = `UDP: ${data.udp.rtt} ms`;
+  document.getElementById('kpiRttSub').innerText = `Tuned: ${data.tuned.rtt} ms`;
   document.getElementById('kpiLoss').innerText = `${data.ppo.loss} %`;
-  document.getElementById('kpiLossSub').innerText = `UDP: ${data.udp.loss} %`;
+  document.getElementById('kpiLossSub').innerText = `Tuned: ${data.tuned.loss} %`;
   document.getElementById('kpiFps').innerText = `${data.ppo.fps} FPS`;
-  document.getElementById('kpiFpsSub').innerText = `UDP: ${data.udp.fps} FPS`;
+  document.getElementById('kpiFpsSub').innerText = `Tuned: ${data.tuned.fps} FPS`;
   document.getElementById('kpiReward').innerText = `${data.ppo.reward}`;
+  document.getElementById('kpiRewardSub').innerText = `Tuned: ${data.tuned.reward}`;
 
-  const pushData = (chart, ppoVal, aimdVal, udpVal) => {
+  const pushData = (chart, key) => {
     chart.data.labels.push(data.step);
-    chart.data.datasets[0].data.push(ppoVal);
-    chart.data.datasets[1].data.push(aimdVal);
-    chart.data.datasets[2].data.push(udpVal);
+    chart.data.datasets[0].data.push(data.ppo[key]);
+    chart.data.datasets[1].data.push(data.tuned[key]);
+    chart.data.datasets[2].data.push(data.aimd[key]);
+    chart.data.datasets[3].data.push(data.udp[key]);
     if (chart.data.labels.length > 50) {
       chart.data.labels.shift();
       chart.data.datasets.forEach(d => d.data.shift());
     }
     chart.update();
   };
-  pushData(rttChart, data.ppo.rtt, data.aimd.rtt, data.udp.rtt);
-  pushData(fpsChart, data.ppo.fps, data.aimd.fps, data.udp.fps);
+  pushData(rttChart, 'rtt');
+  pushData(fpsChart, 'fps');
 }
+
 setInterval(pollStep, 140);
 </script>
 </body>
 </html>
 """
 
+
 class DashboardHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
-        return  
+        return
+
+    def _send_json(self, status_code, payload):
+        self.send_response(status_code)
+        self.send_header("Content-type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(payload).encode("utf-8"))
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -576,28 +596,34 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(HTML_PAGE.encode("utf-8"))
         elif parsed.path == "/api/step":
-            qs = parse_qs(parsed.query)
-            manual = qs.get("manual", ["0"])[0] == "1"
-            fec = float(qs.get("fec", ["0.2"])[0])
-            delay = float(qs.get("delay", ["6.0"])[0])
-            payload = SIM.step(manual_mode=manual, manual_fec=fec, manual_delay=delay)
-            self.send_response(200)
-            self.send_header("Content-type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps(payload).encode("utf-8"))
-        elif parsed.path == "/api/burst":
+            try:
+                qs = parse_qs(parsed.query)
+                manual = qs.get("manual", ["0"])[0] == "1"
+                fec = float(qs.get("fec", ["0.2"])[0])
+                delay = float(qs.get("delay", ["6.0"])[0])
+                payload = SIM.step(manual_mode=manual, manual_fec=fec, manual_delay=delay)
+                self._send_json(200, payload)
+            except (ValueError, KeyError) as exc:
+                self._send_json(400, {"error": str(exc)})
+        else:
+            self._send_json(404, {"error": "Not found"})
+
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        if parsed.path == "/api/burst":
             SIM.trigger_congestion()
-            self.send_response(200)
-            self.end_headers()
+            self._send_json(200, {"status": "burst_locked"})
         elif parsed.path == "/api/reset":
             SIM.reset()
-            self.send_response(200)
-            self.end_headers()
+            self._send_json(200, {"status": "reset"})
+        else:
+            self._send_json(404, {"error": "Not found"})
+
 
 if __name__ == "__main__":
     port = 8050
     url = f"http://localhost:{port}"
-    print(f"🚀 SignalSync Interactive Web Dashboard (Originkit + Thinking Orbs) running at {url}")
+    print(f"SignalSync dashboard running at {url}")
     print("Press Ctrl+C to stop the server.")
     webbrowser.open(url)
     HTTPServer(("127.0.0.1", port), DashboardHandler).serve_forever()
