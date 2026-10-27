@@ -1,72 +1,72 @@
 import json
-import os
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlparse
-import numpy as np
-from stable_baselines3 import PPO
+
 from network_env import SignalSyncEnv
-from baselines import FixedPacingBaseline, AIMDBaseline
+from baselines import AIMDBaseline, FixedPacingBaseline, get_tuned_fixed, load_ppo
+
+# same seed -> same random network after every reset, change it to see a different one
+SEED = 42
+
 
 class SimulationManager:
     def __init__(self):
-        self.env_ppo = SignalSyncEnv(max_steps=100000)
-        self.env_udp = SignalSyncEnv(max_steps=100000)
-        self.env_aimd = SignalSyncEnv(max_steps=100000)
-
-        model_path = "models/ppo_signalsync.zip"
-        self.ppo_model = PPO.load(model_path) if os.path.exists(model_path) else None
-        self.udp_agent = FixedPacingBaseline(fec_rate=0.15, pacing_delay=4.5)
-        self.aimd_agent = AIMDBaseline()
+        self.envs = {n: SignalSyncEnv(max_steps=100000) for n in ("ppo", "tuned", "udp", "aimd")}
+        self.ppo_model = load_ppo()
+        self.agents = {
+            "tuned": get_tuned_fixed(),
+            "udp": FixedPacingBaseline(),
+            "aimd": AIMDBaseline(),
+        }
         self.reset()
 
     def reset(self):
-        self.obs_ppo, _ = self.env_ppo.reset(seed=42)
-        self.obs_udp, _ = self.env_udp.reset(seed=42)
-        self.obs_aimd, _ = self.env_aimd.reset(seed=42)
+        self.obs = {n: env.reset(seed=SEED)[0] for n, env in self.envs.items()}
+        for agent in self.agents.values():
+            agent.reset()
         self.step_count = 0
 
     def trigger_congestion(self):
-        self.env_ppo.channel.current_state = 1
-        self.env_udp.channel.current_state = 1
-        self.env_aimd.channel.current_state = 1
+        for env in self.envs.values():
+            env.channel.current_state = 1
 
     def step(self, manual_mode=False, manual_fec=0.2, manual_delay=6.0):
         self.step_count += 1
 
-        # Synchronize random state so all 3 protocols face identical network conditions
-        rng_state = np.random.get_state()
-
         if manual_mode or self.ppo_model is None:
             action_ppo = SignalSyncEnv.encode_action(manual_fec, manual_delay)
         else:
-            action_ppo, _ = self.ppo_model.predict(self.obs_ppo, deterministic=True)
+            action_ppo, _ = self.ppo_model.predict(self.obs["ppo"], deterministic=True)
 
         fec_ppo, delay_ppo = SignalSyncEnv.decode_action(action_ppo)
-        self.obs_ppo, rew_ppo, _, _, _ = self.env_ppo.step(action_ppo)
-        markov_state = self.env_ppo.channel.current_state
+        self.obs["ppo"], rew_ppo, _, _, _ = self.envs["ppo"].step(action_ppo)
+        markov_state = self.envs["ppo"].channel.current_state
 
-        np.random.set_state(rng_state)
-        action_udp = self.udp_agent.predict(self.obs_udp)
-        self.obs_udp, rew_udp, _, _, _ = self.env_udp.step(action_udp)
+        for name, agent in self.agents.items():
+            self.obs[name], _, _, _, _ = self.envs[name].step(agent.predict(self.obs[name]))
 
-        np.random.set_state(rng_state)
-        action_aimd = self.aimd_agent.predict(self.obs_aimd)
-        self.obs_aimd, rew_aimd, _, _, _ = self.env_aimd.step(action_aimd)
-
-        # Determine Thinking Orb semantic state based on agent lifecycle
+        obs_ppo = self.obs["ppo"]
         if manual_mode:
             orb_state = "listening"
             orb_label = "MANUAL OVERRIDE ACTIVE — Monitoring user pacing parameters"
         elif markov_state == 1:
             orb_state = "solving"
             orb_label = "SOLVING CONGESTION BURST — Boosting FEC shield & pacing delay"
-        elif self.obs_ppo[3] > 15.0:
+        elif obs_ppo[3] > 15.0:
             orb_state = "searching"
             orb_label = "DRAINING SOCKET BUFFER — Scanning optimal queue equilibrium"
         else:
             orb_state = "working"
             orb_label = "OPTIMAL PACING LOCKED — Ultra-low latency 60 FPS stream"
+
+        def snap(obs):
+            return {
+                "rtt": round(float(obs[0]), 1),
+                "loss": round(float(obs[2] * 100.0), 1),
+                "buffer": round(float(obs[3]), 1),
+                "fps": round(float(obs[4]), 1),
+            }
 
         return {
             "step": self.step_count,
@@ -74,27 +74,15 @@ class SimulationManager:
             "orb_state": orb_state,
             "orb_label": orb_label,
             "ppo": {
-                "rtt": round(float(self.obs_ppo[0]), 1),
-                "jitter": round(float(self.obs_ppo[1]), 1),
-                "loss": round(float(self.obs_ppo[2] * 100.0), 1),
-                "buffer": round(float(self.obs_ppo[3]), 1),
-                "fps": round(float(self.obs_ppo[4]), 1),
+                **snap(obs_ppo),
+                "jitter": round(float(obs_ppo[1]), 1),
                 "fec": round(float(fec_ppo * 100.0), 1),
                 "delay": round(float(delay_ppo), 2),
                 "reward": round(float(rew_ppo), 2),
             },
-            "udp": {
-                "rtt": round(float(self.obs_udp[0]), 1),
-                "loss": round(float(self.obs_udp[2] * 100.0), 1),
-                "buffer": round(float(self.obs_udp[3]), 1),
-                "fps": round(float(self.obs_udp[4]), 1),
-            },
-            "aimd": {
-                "rtt": round(float(self.obs_aimd[0]), 1),
-                "loss": round(float(self.obs_aimd[2] * 100.0), 1),
-                "buffer": round(float(self.obs_aimd[3]), 1),
-                "fps": round(float(self.obs_aimd[4]), 1),
-            },
+            "tuned": snap(self.obs["tuned"]),
+            "udp": snap(self.obs["udp"]),
+            "aimd": snap(self.obs["aimd"]),
         }
 
 
@@ -104,7 +92,7 @@ HTML_PAGE = """<!DOCTYPE html>
 <html lang="en" class="dark">
 <head>
 <meta charset="UTF-8">
-<title>SignalSync — Originkit & Thinking Orbs RL Telemetry</title>
+<title>SignalSync — RL Telemetry</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
@@ -116,14 +104,12 @@ HTML_PAGE = """<!DOCTYPE html>
     overflow-x: hidden;
   }
   .mono { font-family: 'JetBrains Mono', monospace; }
-  /* Originkit Kinetic Grid Background */
   .kinetic-bg {
     background-size: 36px 36px;
     background-image: 
       linear-gradient(to right, rgba(255,255,255,0.03) 1px, transparent 1px),
       linear-gradient(to bottom, rgba(255,255,255,0.03) 1px, transparent 1px);
   }
-  /* Originkit Glass Bento Card with Spotlight Border */
   .bento-card {
     background: rgba(15, 17, 23, 0.78);
     backdrop-filter: blur(16px);
@@ -143,7 +129,6 @@ HTML_PAGE = """<!DOCTYPE html>
 </head>
 <body class="kinetic-bg min-h-screen p-5">
 
-  <!-- Top Header Bar with Thinking Orb Status Pill -->
   <header class="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-4 mb-5 bento-card px-6 py-4">
     <div class="flex items-center gap-4">
       <div class="relative flex items-center justify-center w-16 h-16 rounded-2xl bg-black/60 border border-white/10">
@@ -159,7 +144,6 @@ HTML_PAGE = """<!DOCTYPE html>
       </div>
     </div>
 
-    <!-- Interactive Simulation Controls -->
     <div class="flex flex-wrap items-center gap-3">
       <button id="btnPlayPause" onclick="togglePlay()" class="px-4 py-2 rounded-xl text-xs font-semibold bg-emerald-500 hover:bg-emerald-400 text-black transition">
         ⏸ Pause
@@ -175,13 +159,11 @@ HTML_PAGE = """<!DOCTYPE html>
 
   <main class="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-12 gap-5">
 
-    <!-- Left Column: Originkit Particle Tunnel & Agent Controls (4 Cols) -->
     <div class="lg:col-span-4 flex flex-col gap-5">
 
-      <!-- Originkit Particle Tunnel: Live Packet Flow Visualizer -->
       <div class="bento-card p-4">
         <div class="flex items-center justify-between mb-2">
-          <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">Originkit Particle Tunnel (Packet Stream)</span>
+          <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">Packet Stream</span>
           <span id="stepCounter" class="text-xs mono text-sky-400">Step #0</span>
         </div>
         <canvas id="particleTunnel" width="380" height="150" class="w-full rounded-xl bg-black/70 border border-white/5"></canvas>
@@ -192,7 +174,6 @@ HTML_PAGE = """<!DOCTYPE html>
         </div>
       </div>
 
-      <!-- Token Bucket Queue Comparison Bars -->
       <div class="bento-card p-4">
         <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">Socket Buffer Occupancy (Max 100 pkts)</span>
         <div class="mt-3 space-y-3">
@@ -208,6 +189,16 @@ HTML_PAGE = """<!DOCTYPE html>
 
           <div>
             <div class="flex justify-between text-xs mb-1 mono">
+              <span class="text-sky-400 font-semibold">Fixed (tuned)</span>
+              <span id="bufTunedText">0.0 pkts</span>
+            </div>
+            <div class="w-full h-3 bg-white/5 rounded-full overflow-hidden">
+              <div id="bufTunedBar" class="h-full bg-sky-500 transition-all duration-150" style="width: 0%"></div>
+            </div>
+          </div>
+
+          <div>
+            <div class="flex justify-between text-xs mb-1 mono">
               <span class="text-amber-400 font-semibold">AIMD Control (TCP)</span>
               <span id="bufAimdText">0.0 pkts</span>
             </div>
@@ -218,7 +209,7 @@ HTML_PAGE = """<!DOCTYPE html>
 
           <div>
             <div class="flex justify-between text-xs mb-1 mono">
-              <span class="text-rose-400 font-semibold">Fixed Pacing (UDP)</span>
+              <span class="text-rose-400 font-semibold">Fixed (naive)</span>
               <span id="bufUdpText">0.0 pkts</span>
             </div>
             <div class="w-full h-3 bg-white/5 rounded-full overflow-hidden">
@@ -228,7 +219,6 @@ HTML_PAGE = """<!DOCTYPE html>
         </div>
       </div>
 
-      <!-- Live RL Action Gauges & Interactive Manual Override -->
       <div class="bento-card p-4">
         <div class="flex items-center justify-between mb-3">
           <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">Agent Continuous Actions</span>
@@ -258,25 +248,23 @@ HTML_PAGE = """<!DOCTYPE html>
       </div>
     </div>
 
-    <!-- Right Column: KPI Metric Cards & Real-Time Streaming Charts (8 Cols) -->
     <div class="lg:col-span-8 flex flex-col gap-5">
 
-      <!-- 4 Scramble-Style KPI Cards -->
       <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <div class="bento-card p-3.5">
           <div class="text-[11px] text-slate-400 uppercase">PPO Latency (RTT)</div>
           <div id="kpiRtt" class="text-2xl font-bold text-emerald-400 mono mt-1">20.0 ms</div>
-          <div id="kpiRttSub" class="text-[11px] text-slate-500 mono mt-0.5">UDP: 20.0 ms</div>
+          <div id="kpiRttSub" class="text-[11px] text-slate-500 mono mt-0.5">Tuned: 20.0 ms</div>
         </div>
         <div class="bento-card p-3.5">
           <div class="text-[11px] text-slate-400 uppercase">Effective Loss</div>
           <div id="kpiLoss" class="text-2xl font-bold text-sky-400 mono mt-1">0.0 %</div>
-          <div id="kpiLossSub" class="text-[11px] text-slate-500 mono mt-0.5">UDP: 0.0 %</div>
+          <div id="kpiLossSub" class="text-[11px] text-slate-500 mono mt-0.5">Tuned: 0.0 %</div>
         </div>
         <div class="bento-card p-3.5">
           <div class="text-[11px] text-slate-400 uppercase">Client Render FPS</div>
           <div id="kpiFps" class="text-2xl font-bold text-indigo-400 mono mt-1">60.0 FPS</div>
-          <div id="kpiFpsSub" class="text-[11px] text-slate-500 mono mt-0.5">UDP: 60.0 FPS</div>
+          <div id="kpiFpsSub" class="text-[11px] text-slate-500 mono mt-0.5">Tuned: 60.0 FPS</div>
         </div>
         <div class="bento-card p-3.5">
           <div class="text-[11px] text-slate-400 uppercase">Step Reward</div>
@@ -285,7 +273,6 @@ HTML_PAGE = """<!DOCTYPE html>
         </div>
       </div>
 
-      <!-- Real-Time Charts -->
       <div class="bento-card p-4 flex-1 flex flex-col justify-between gap-4">
         <div class="h-44"><canvas id="rttChart"></canvas></div>
         <div class="h-44"><canvas id="fpsChart"></canvas></div>
@@ -295,7 +282,6 @@ HTML_PAGE = """<!DOCTYPE html>
   </main>
 
 <script>
-// --- 1. THINKING ORBS 2D CANVAS ENGINE (Jakubantalik / yogesharc inspired) ---
 const orbCanvas = document.getElementById('thinkingOrbCanvas');
 const orbCtx = orbCanvas.getContext('2d');
 let currentOrbState = 'working';
@@ -316,14 +302,11 @@ function drawThinkingOrb(time) {
     let theta = d.theta + t;
 
     if (currentOrbState === 'solving') {
-      // Scrambling bands that snap in phase during congestion bursts
       theta += Math.sin(t * 3.5 + idx) * 0.65;
       phi += Math.cos(t * 2.5 + idx * 0.5) * 0.25;
     } else if (currentOrbState === 'searching') {
-      // Meridian scan sweep
       theta += Math.sin(phi * 3 + t * 2) * 0.3;
     } else if (currentOrbState === 'listening') {
-      // Waveform ripple through rings
       phi += Math.sin(t * 4 + idx * 0.3) * 0.18;
     }
 
@@ -331,7 +314,6 @@ function drawThinkingOrb(time) {
     const y3d = Math.cos(phi);
     const z3d = Math.sin(phi) * Math.sin(theta);
 
-    // Tilt projection
     const tilt = 0.35;
     const yRot = y3d * Math.cos(tilt) - z3d * Math.sin(tilt);
     const zRot = y3d * Math.sin(tilt) + z3d * Math.cos(tilt);
@@ -342,10 +324,10 @@ function drawThinkingOrb(time) {
     const dotRadius = Math.max(0.9, 2.3 * scale);
     const alpha = Math.min(1, Math.max(0.18, (zRot + 1.2) / 2.2));
 
-    let rgb = '52, 211, 153'; // working emerald
-    if (currentOrbState === 'solving') rgb = '251, 113, 133'; // rose
-    else if (currentOrbState === 'searching') rgb = '251, 191, 36'; // amber
-    else if (currentOrbState === 'listening') rgb = '192, 132, 252'; // purple
+    let rgb = '52, 211, 153';
+    if (currentOrbState === 'solving') rgb = '251, 113, 133';
+    else if (currentOrbState === 'searching') rgb = '251, 191, 36';
+    else if (currentOrbState === 'listening') rgb = '192, 132, 252';
 
     orbCtx.beginPath();
     orbCtx.arc(px, py, dotRadius, 0, Math.PI * 2);
@@ -356,7 +338,6 @@ function drawThinkingOrb(time) {
 }
 requestAnimationFrame(drawThinkingOrb);
 
-// --- 2. ORIGINKIT PARTICLE TUNNEL (LIVE PACKET STREAM) ---
 const tunnelCanvas = document.getElementById('particleTunnel');
 const tCtx = tunnelCanvas.getContext('2d');
 let packets = [];
@@ -381,7 +362,6 @@ function drawParticleTunnel() {
   tCtx.fillStyle = 'rgba(8, 10, 15, 0.32)';
   tCtx.fillRect(0, 0, tunnelCanvas.width, tunnelCanvas.height);
 
-  // Router queue gate in center
   const gateX = 190;
   tCtx.strokeStyle = latestState.markov_bad ? 'rgba(244,63,94,0.6)' : 'rgba(56,189,248,0.3)';
   tCtx.lineWidth = 2;
@@ -415,7 +395,6 @@ function drawParticleTunnel() {
 }
 requestAnimationFrame(drawParticleTunnel);
 
-// --- 3. STREAMING CHARTS ---
 function createChart(canvasId, label, yMax) {
   return new Chart(document.getElementById(canvasId), {
     type: 'line',
@@ -423,8 +402,9 @@ function createChart(canvasId, label, yMax) {
       labels: [],
       datasets: [
         { label: 'SignalSync PPO', data: [], borderColor: '#34d399', borderWidth: 2, pointRadius: 0, tension: 0.3 },
+        { label: 'Fixed (tuned)', data: [], borderColor: '#38bdf8', borderWidth: 1.5, pointRadius: 0, tension: 0.3 },
         { label: 'AIMD (TCP)', data: [], borderColor: '#fbbf24', borderWidth: 1.5, pointRadius: 0, tension: 0.3 },
-        { label: 'Fixed (UDP)', data: [], borderColor: '#f43f5e', borderDash: [4, 4], borderWidth: 1.5, pointRadius: 0, tension: 0.3 }
+        { label: 'Fixed (naive)', data: [], borderColor: '#f43f5e', borderDash: [4, 4], borderWidth: 1.5, pointRadius: 0, tension: 0.3 }
       ]
     },
     options: {
@@ -483,7 +463,6 @@ async function pollStep() {
   latestState = data;
   spawnPackets();
 
-  // Update Thinking Orb state & glow
   currentOrbState = data.orb_state;
   orbCanvas.className = `orb-glow-${data.orb_state}`;
   document.getElementById('orbModeBadge').innerText = `ORB: ${data.orb_state.toUpperCase()}`;
@@ -500,15 +479,15 @@ async function pollStep() {
 
   document.getElementById('stepCounter').innerText = `Step #${data.step}`;
 
-  // Buffers
   document.getElementById('bufPpoText').innerText = `${data.ppo.buffer} pkts`;
   document.getElementById('bufPpoBar').style.width = `${Math.min(100, data.ppo.buffer)}%`;
+  document.getElementById('bufTunedText').innerText = `${data.tuned.buffer} pkts`;
+  document.getElementById('bufTunedBar').style.width = `${Math.min(100, data.tuned.buffer)}%`;
   document.getElementById('bufAimdText').innerText = `${data.aimd.buffer} pkts`;
   document.getElementById('bufAimdBar').style.width = `${Math.min(100, data.aimd.buffer)}%`;
   document.getElementById('bufUdpText').innerText = `${data.udp.buffer} pkts`;
   document.getElementById('bufUdpBar').style.width = `${Math.min(100, data.udp.buffer)}%`;
 
-  // Actions
   if (!manual) {
     document.getElementById('fecSlider').value = data.ppo.fec;
     document.getElementById('delaySlider').value = data.ppo.delay;
@@ -516,29 +495,28 @@ async function pollStep() {
   document.getElementById('fecValText').innerText = `${data.ppo.fec}%`;
   document.getElementById('delayValText').innerText = `${data.ppo.delay} ms`;
 
-  // KPIs
   document.getElementById('kpiRtt').innerText = `${data.ppo.rtt} ms`;
-  document.getElementById('kpiRttSub').innerText = `UDP: ${data.udp.rtt} ms`;
+  document.getElementById('kpiRttSub').innerText = `Tuned: ${data.tuned.rtt} ms`;
   document.getElementById('kpiLoss').innerText = `${data.ppo.loss} %`;
-  document.getElementById('kpiLossSub').innerText = `UDP: ${data.udp.loss} %`;
+  document.getElementById('kpiLossSub').innerText = `Tuned: ${data.tuned.loss} %`;
   document.getElementById('kpiFps').innerText = `${data.ppo.fps} FPS`;
-  document.getElementById('kpiFpsSub').innerText = `UDP: ${data.udp.fps} FPS`;
+  document.getElementById('kpiFpsSub').innerText = `Tuned: ${data.tuned.fps} FPS`;
   document.getElementById('kpiReward').innerText = `${data.ppo.reward}`;
 
-  // Charts (Rolling 50 steps)
-  const pushData = (chart, ppoVal, aimdVal, udpVal) => {
+  const pushData = (chart, key) => {
     chart.data.labels.push(data.step);
-    chart.data.datasets[0].data.push(ppoVal);
-    chart.data.datasets[1].data.push(aimdVal);
-    chart.data.datasets[2].data.push(udpVal);
+    chart.data.datasets[0].data.push(data.ppo[key]);
+    chart.data.datasets[1].data.push(data.tuned[key]);
+    chart.data.datasets[2].data.push(data.aimd[key]);
+    chart.data.datasets[3].data.push(data.udp[key]);
     if (chart.data.labels.length > 50) {
       chart.data.labels.shift();
       chart.data.datasets.forEach(d => d.data.shift());
     }
     chart.update();
   };
-  pushData(rttChart, data.ppo.rtt, data.aimd.rtt, data.udp.rtt);
-  pushData(fpsChart, data.ppo.fps, data.aimd.fps, data.udp.fps);
+  pushData(rttChart, 'rtt');
+  pushData(fpsChart, 'fps');
 }
 
 setInterval(pollStep, 140);
@@ -547,9 +525,10 @@ setInterval(pollStep, 140);
 </html>
 """
 
+
 class DashboardHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
-        return  # Keep terminal output clean
+        return
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -576,11 +555,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
             SIM.reset()
             self.send_response(200)
             self.end_headers()
+        else:
+            self.send_response(404)
+            self.end_headers()
+
 
 if __name__ == "__main__":
     port = 8050
     url = f"http://localhost:{port}"
-    print(f"🚀 SignalSync Interactive Web Dashboard (Originkit + Thinking Orbs) running at {url}")
+    print(f"SignalSync dashboard running at {url}")
     print("Press Ctrl+C to stop the server.")
     webbrowser.open(url)
     HTTPServer(("127.0.0.1", port), DashboardHandler).serve_forever()

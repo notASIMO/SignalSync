@@ -1,167 +1,160 @@
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
-
+ 
+ 
 class NetworkChannel:
-    """Gilbert-Elliott Markov Chain for realistic bursty packet loss and jitter."""
-    def __init__(self):
-        self.p_gb = 0.05           # 5% chance per step to enter congestion burst
-        self.p_bg = 0.20           # 20% chance per step to recover to Good state
-        self.loss_prob_good = 0.01 # 1% packet loss in Good state
-        self.loss_prob_bad = 0.35  # 35% packet loss in Bad state (recoverable via FEC)
-        self.current_state = 0     # 0 = Good, 1 = Bad
-        self.base_rtt = 20.0       # ms
-
-    def step_network(self):
-        # Markov state transition
-        if self.current_state == 0 and np.random.rand() < self.p_gb:
+    def __init__(self, rng=None):
+        # transition probs are per tick, so a burst lasts ~5 ticks on average
+        self.p_gb = 0.05
+        self.p_bg = 0.20
+        self.loss_prob_good = 0.01
+        self.loss_prob_bad = 0.35
+        self.current_state = 0
+        self.base_rtt = 20.0
+        self.rng = rng if rng is not None else np.random.default_rng()
+ 
+    def advance_state(self):
+        if self.current_state == 0 and self.rng.random() < self.p_gb:
             self.current_state = 1
-        elif self.current_state == 1 and np.random.rand() < self.p_bg:
+        elif self.current_state == 1 and self.rng.random() < self.p_bg:
             self.current_state = 0
-
-        # Generate packet loss and jitter based on active state
+ 
+    def sample_packet(self):
         if self.current_state == 0:
-            is_dropped = np.random.rand() < self.loss_prob_good
-            rtt = self.base_rtt + np.random.exponential(scale=2.0)
+            is_dropped = self.rng.random() < self.loss_prob_good
+            rtt = self.base_rtt + self.rng.exponential(scale=2.0)
         else:
-            is_dropped = np.random.rand() < self.loss_prob_bad
-            rtt = self.base_rtt + np.random.exponential(scale=35.0)
-            
-        return is_dropped, rtt
-
-
+            is_dropped = self.rng.random() < self.loss_prob_bad
+            rtt = self.base_rtt + self.rng.exponential(scale=35.0)
+        return bool(is_dropped), float(rtt)
+ 
+ 
 class SignalSyncEnv(gym.Env):
-    """Custom RL Environment for Adaptive Packet Pacing."""
     def __init__(self, max_steps=200):
-        super(SignalSyncEnv, self).__init__()
-        
-        # State S: [Recent_RTT (ms), Jitter (ms), Effective_Loss (0-1), Buffer_Fill (pkts), Render_FPS]
+        super().__init__()
+ 
+        # obs: [rtt, rtt change, effective loss, buffer fill, fps]
         self.observation_space = spaces.Box(
-            low=np.zeros(5, dtype=np.float32), 
-            high=np.full(5, 1000.0, dtype=np.float32), 
-            dtype=np.float32
+            low=np.zeros(5, dtype=np.float32),
+            high=np.full(5, 1000.0, dtype=np.float32),
+            dtype=np.float32,
         )
-        
-        # Normalized Action Space [-1.0, 1.0] for stable PPO gradient updates:
-        # action[0] maps [-1, 1] -> FEC_Ratio in [0.0, 0.5]
-        # action[1] maps [-1, 1] -> Pacing_Delay in [1.0, 25.0] ms
+ 
+        # action in [-1, 1]^2 -> fec in [0, 0.5], pacing delay in [3.5, 14] ms
         self.action_space = spaces.Box(
-            low=np.array([-1.0, -1.0], dtype=np.float32), 
-            high=np.array([1.0, 1.0], dtype=np.float32), 
-            dtype=np.float32
+            low=np.array([-1.0, -1.0], dtype=np.float32),
+            high=np.array([1.0, 1.0], dtype=np.float32),
+            dtype=np.float32,
         )
-        
-        # Environment Configuration
+ 
         self.tick_duration_ms = 100.0
         self.max_buffer_size = 100.0
-        self.link_capacity = 20.0      # Max packets drained per 100ms tick
-        self.target_base_packets = 16.0 # Packets/tick required for smooth 60 FPS
+        self.link_capacity = 20.0
+        self.target_base_packets = 16.0
         self.max_steps = max_steps
-        
+ 
         self.channel = NetworkChannel()
-        
-        # Internal State Variables
+        self._episode_seed = 0
+ 
         self.buffer_fill = 0.0
         self.recent_rtt = 20.0
         self.recent_jitter = 0.0
         self.render_fps = 60.0
         self.current_step = 0
-
+ 
     @staticmethod
     def encode_action(fec_ratio, pacing_delay):
-        """Helper for baselines to convert physical [fec, delay] into normalized [-1, 1] actions."""
         norm_fec = np.clip((fec_ratio / 0.5) * 2.0 - 1.0, -1.0, 1.0)
         norm_delay = np.clip(((pacing_delay - 3.5) / 10.5) * 2.0 - 1.0, -1.0, 1.0)
         return np.array([norm_fec, norm_delay], dtype=np.float32)
-
+ 
     @staticmethod
     def decode_action(action):
-        """Maps normalized [-1, 1] action back to physical [fec_ratio, pacing_delay_ms]."""
         a0 = float(np.clip(action[0], -1.0, 1.0))
         a1 = float(np.clip(action[1], -1.0, 1.0))
-        fec_ratio = (a0 + 1.0) * 0.25              # [0.0, 0.5]
-        pacing_delay = 3.5 + (a1 + 1.0) * 5.25     # [3.5, 14.0] ms
+        fec_ratio = (a0 + 1.0) * 0.25
+        pacing_delay = 3.5 + (a1 + 1.0) * 5.25
         return fec_ratio, pacing_delay
-        
+ 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
+        # same reset seed -> same network for every policy
+        self._episode_seed = int(self.np_random.integers(0, 2**31 - 1))
         self.buffer_fill = 0.0
         self.recent_rtt = 20.0
         self.recent_jitter = 0.0
         self.render_fps = 60.0
         self.current_step = 0
         self.channel.current_state = 0
-        
+ 
         initial_state = np.array(
             [self.recent_rtt, self.recent_jitter, 0.0, self.buffer_fill, self.render_fps],
-            dtype=np.float32
+            dtype=np.float32,
         )
         return initial_state, {}
-
+ 
     def step(self, action):
         self.current_step += 1
         fec_ratio, pacing_delay = self.decode_action(action)
-        
-        # 1. Calculate incoming packets generated by the game client
+ 
+        # channel randomness depends only on (episode seed, tick), not on how many packets we send
+        self.channel.rng = np.random.default_rng([self._episode_seed, self.current_step])
+        self.channel.advance_state()
+ 
         base_packets = self.tick_duration_ms / pacing_delay
         total_incoming = base_packets * (1.0 + fec_ratio)
-        
-        # 2. Add to Token Bucket Buffer & compute tail-drop overflow
+ 
         self.buffer_fill += total_incoming
         buffer_overflow_drops = max(0.0, self.buffer_fill - self.max_buffer_size)
         self.buffer_fill = min(self.buffer_fill, self.max_buffer_size)
-        
-        # 3. Drain Token Bucket over the physical link
+ 
         transmitted_packets = min(self.buffer_fill, self.link_capacity)
         self.buffer_fill -= transmitted_packets
-        
-        # Queueing Delay: 2ms added latency per packet sitting in the buffer
+ 
         queueing_delay = self.buffer_fill * 2.0
-        
-        # 4. Pass transmitted packets through Gilbert-Elliott Markov Channel
+ 
         network_drops = 0
         rtt_samples = []
         for _ in range(int(round(transmitted_packets))):
-            dropped, rtt = self.channel.step_network()
+            dropped, rtt = self.channel.sample_packet()
             if dropped:
                 network_drops += 1
             else:
                 rtt_samples.append(rtt)
-                
-        # 5. Calculate Effective Loss (normalized to [0.0, 1.0]) and Client Render FPS
+ 
+        # fec recovers up to this many dropped packets
         fec_shield_packets = transmitted_packets * (fec_ratio / (1.0 + fec_ratio))
         unrecovered_network_drops = max(0.0, float(network_drops) - fec_shield_packets)
         total_unrecovered = unrecovered_network_drops + buffer_overflow_drops
-        effective_loss = float(np.clip(total_unrecovered / max(transmitted_packets + buffer_overflow_drops, 1.0), 0.0, 1.0))
-        
-        # Client Render FPS degrades if pacing is too slow (< 16 base packets/tick) or loss is high
+        effective_loss = float(np.clip(
+            total_unrecovered / max(transmitted_packets + buffer_overflow_drops, 1.0), 0.0, 1.0))
+ 
         delivered_rate_ratio = min(1.0, base_packets / self.target_base_packets) * (1.0 - effective_loss)
         self.render_fps = float(np.clip(60.0 * delivered_rate_ratio, 5.0, 60.0))
-        
+ 
         if rtt_samples:
-            avg_network_rtt = float(np.mean(rtt_samples))
-            new_rtt = avg_network_rtt + queueing_delay
+            new_rtt = float(np.mean(rtt_samples)) + queueing_delay
             self.recent_jitter = abs(new_rtt - self.recent_rtt)
             self.recent_rtt = new_rtt
         else:
-            self.recent_rtt = 300.0 
+            self.recent_rtt = 300.0
             self.recent_jitter = 80.0
-
-        # 6. Scaled Reward Function (kept near [-5, 0] per step for stable Critic convergence)
+ 
+        # reward is the negative sum of these penalties
         latency_penalty = 0.02 * self.recent_rtt + 0.01 * self.recent_jitter
         loss_penalty = 8.0 * effective_loss
         fps_penalty = 0.08 * (60.0 - self.render_fps)
         fec_overhead_penalty = 0.8 * fec_ratio
-        
         reward = -(latency_penalty + loss_penalty + fps_penalty + fec_overhead_penalty)
-        
+ 
         next_state = np.array([
-            self.recent_rtt, 
-            self.recent_jitter, 
-            effective_loss, 
-            self.buffer_fill, 
-            self.render_fps
+            self.recent_rtt,
+            self.recent_jitter,
+            effective_loss,
+            self.buffer_fill,
+            self.render_fps,
         ], dtype=np.float32)
-        
+ 
         truncated = self.current_step >= self.max_steps
         return next_state, float(reward), False, truncated, {}

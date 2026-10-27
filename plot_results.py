@@ -1,50 +1,26 @@
+import glob
 import os
-import numpy as np
+ 
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from stable_baselines3 import PPO
+import numpy as np
+ 
+from baselines import (AIMDBaseline, EVAL_SEEDS, FixedPacingBaseline, evaluate_policy,
+                       get_tuned_fixed, load_ppo)
 from network_env import SignalSyncEnv
-from baselines import FixedPacingBaseline, AIMDBaseline
-
-def collect_metrics(agent, is_sb3=False, num_episodes=30, base_seed=100):
-    env = SignalSyncEnv()
-    ep_rewards, ep_rtts, ep_losses, ep_fps = [], [], [], []
-
-    for ep in range(num_episodes):
-        obs, _ = env.reset(seed=base_seed + ep)
-        done = False
-        total_rew = 0.0
-        rtts, losses, fps_vals = [], [], []
-
-        while not done:
-            if is_sb3:
-                action, _ = agent.predict(obs, deterministic=True)
-            else:
-                action = agent.predict(obs)
-            obs, reward, terminated, truncated, _ = env.step(action)
-            total_rew += reward
-            rtts.append(obs[0])
-            losses.append(obs[2] * 100.0)
-            fps_vals.append(obs[4])
-            done = terminated or truncated
-
-        ep_rewards.append(total_rew)
-        ep_rtts.append(np.mean(rtts))
-        ep_losses.append(np.mean(losses))
-        ep_fps.append(np.mean(fps_vals))
-
-    return {
-        "reward": (np.mean(ep_rewards), np.std(ep_rewards)),
-        "rtt": (np.mean(ep_rtts), np.std(ep_rtts)),
-        "loss": (np.mean(ep_losses), np.std(ep_losses)),
-        "fps": (np.mean(ep_fps), np.std(ep_fps)),
-    }
-
-def collect_single_trace(agent, is_sb3=False, seed=42):
+ 
+TRACE_SEED = 42
+ 
+ 
+# runs one seeded episode and records per-step metrics for the time-series plot
+def collect_single_trace(agent, is_sb3=False, seed=TRACE_SEED):
     env = SignalSyncEnv()
     obs, _ = env.reset(seed=seed)
+    if not is_sb3:
+        agent.reset()
     done = False
-    rtts, losses, buffers, fps_vals, fecs, delays = [], [], [], [], [], []
-
+    t = {k: [] for k in ("rtt", "loss", "buffer", "fps", "fec", "delay")}
     while not done:
         if is_sb3:
             action, _ = agent.predict(obs, deterministic=True)
@@ -52,133 +28,107 @@ def collect_single_trace(agent, is_sb3=False, seed=42):
             action = agent.predict(obs)
         fec, delay = SignalSyncEnv.decode_action(action)
         obs, _, terminated, truncated, _ = env.step(action)
-
-        rtts.append(obs[0])
-        losses.append(obs[2] * 100.0)
-        buffers.append(obs[3])
-        fps_vals.append(obs[4])
-        fecs.append(fec * 100.0)
-        delays.append(delay)
+        t["rtt"].append(obs[0]); t["loss"].append(obs[2] * 100.0)
+        t["buffer"].append(obs[3]); t["fps"].append(obs[4])
+        t["fec"].append(fec * 100.0); t["delay"].append(delay)
         done = terminated or truncated
-
-    return {
-        "rtt": np.array(rtts),
-        "loss": np.array(losses),
-        "buffer": np.array(buffers),
-        "fps": np.array(fps_vals),
-        "fec": np.array(fecs),
-        "delay": np.array(delays),
-    }
-
+    return {k: np.array(v) for k, v in t.items()}
+ 
+ 
+# training reward per seed, from the Monitor logs written by train.py
+def plot_learning_curves():
+    files = sorted(glob.glob("results/train_monitor_seed*.monitor.csv"))
+    if not files:
+        print("No training logs found - skipping learning curve (run train.py).")
+        return
+    fig, ax = plt.subplots(figsize=(8, 4.5), dpi=200)
+    for f in files:
+        data = np.atleast_2d(np.genfromtxt(f, delimiter=",", skip_header=2))
+        rewards, steps = data[:, 0], np.cumsum(data[:, 1])
+        w = max(1, min(10, len(rewards)))
+        smooth = np.convolve(rewards, np.ones(w) / w, mode="valid")
+        label = os.path.basename(f).split(".")[0].replace("train_monitor_", "")
+        ax.plot(steps[w - 1:], smooth, label=label)
+    ax.set_xlabel("Training timesteps"); ax.set_ylabel("Episode reward (10-episode average)")
+    ax.set_title("PPO learning curves"); ax.grid(True, alpha=0.4); ax.legend()
+    plt.tight_layout(); plt.savefig("results/learning_curve.png"); plt.close()
+    print("Saved results/learning_curve.png")
+ 
+ 
 def main():
     os.makedirs("results", exist_ok=True)
-    model_path = "models/ppo_signalsync.zip"
-    if not os.path.exists(model_path):
-        raise FileNotFoundError(f"Trained model not found at {model_path}. Run `python train.py` first.")
-
-    fixed_agent = FixedPacingBaseline(fec_rate=0.15, pacing_delay=4.5)
-    aimd_agent = AIMDBaseline()
-    ppo_agent = PPO.load(model_path)
-
-    print("Running 30-episode evaluation across all protocols...")
+    tuned = get_tuned_fixed()  # best constant policy found by grid search
+    ppo = load_ppo()
     agents = [
-        ("Fixed (UDP)", fixed_agent, False, "#e74c3c"),
-        ("AIMD (TCP)", aimd_agent, False, "#f39c12"),
-        ("SignalSync (PPO)", ppo_agent, True, "#2ecc71"),
+        ("Fixed (naive)", FixedPacingBaseline(), False, "#e74c3c"),
+        (f"Fixed (tuned {tuned.fec_rate:.2f}/{tuned.pacing_delay:.2f}ms)", tuned, False, "#3498db"),
+        ("AIMD", AIMDBaseline(), False, "#f39c12"),
     ]
-
-    results = {}
-    for name, agent, is_sb3, _ in agents:
-        results[name] = collect_metrics(agent, is_sb3=is_sb3, num_episodes=30)
-
-    # --- Plot 1: 4-Panel Bar Chart Summary ---
-    plt.style.use("seaborn-v0_8-whitegrid" if "seaborn-v0_8-whitegrid" in plt.style.available else "default")
-    fig, axes = plt.subplots(2, 2, figsize=(12, 8), dpi=300)
-    fig.suptitle("SignalSync (PPO) vs. Traditional Networking Baselines (30 Episodes)", fontsize=14, fontweight="bold")
-
-    metrics_cfg = [
-        ("reward", "Mean Episode Reward (Higher is Better)", axes[0, 0]),
-        ("rtt", "Average Latency / RTT in ms (Lower is Better)", axes[0, 1]),
-        ("loss", "Effective Packet Loss % (Lower is Better)", axes[1, 0]),
-        ("fps", "Client Render FPS (Higher is Better)", axes[1, 1]),
-    ]
-
-    names = [a[0] for a in agents]
-    colors = [a[3] for a in agents]
-
-    for key, title, ax in metrics_cfg:
+    if ppo is not None:
+        agents.append(("SignalSync (PPO)", ppo, True, "#2ecc71"))
+    else:
+        print("\n*** PPO missing: figures below contain baselines ONLY. ***\n")
+ 
+    print(f"Evaluating {len(agents)} policies on the same {len(EVAL_SEEDS)} seeded episodes...")
+    # every policy runs on the same seeded episodes, so the networks are identical
+    results = {n: evaluate_policy(a, is_sb3=s) for n, a, s, _ in agents}
+ 
+    # results table for the report
+    lines = [f"{'Policy':44s} {'Reward':>16s} {'RTT ms':>9s} {'Loss %':>8s} {'FPS':>7s}"]
+    for n, r in results.items():
+        lines.append(f"{n:44s} {r['reward'][0]:8.1f} +/- {r['reward'][1]:5.1f} "
+                     f"{r['rtt'][0]:9.1f} {r['loss'][0]:8.2f} {r['fps'][0]:7.1f}")
+    table = "\n".join(lines)
+    print("\n" + table)
+    open("results/results_table.txt", "w").write(table + "\n")
+ 
+    fig, axes = plt.subplots(2, 2, figsize=(13, 8), dpi=300)
+    fig.suptitle(f"SignalSync vs. baselines ({len(EVAL_SEEDS)} seeded episodes, same networks)",
+                 fontsize=14, fontweight="bold")
+    cfg = [("reward", "Mean Episode Reward (higher is better)", axes[0, 0]),
+           ("rtt", "Average RTT in ms (lower is better)", axes[0, 1]),
+           ("loss", "Effective Packet Loss % (lower is better)", axes[1, 0]),
+           ("fps", "Client Render FPS (higher is better)", axes[1, 1])]
+    names = [a[0] for a in agents]; colors = [a[3] for a in agents]
+    for key, title, ax in cfg:
         means = [results[n][key][0] for n in names]
         stds = [results[n][key][1] for n in names]
-        bars = ax.bar(names, means, yerr=stds, capsize=6, color=colors, edgecolor="black", alpha=0.88)
+        bars = ax.bar(range(len(names)), means, yerr=stds, capsize=6, color=colors,
+                      edgecolor="black", alpha=0.88)
+        ax.set_xticks(range(len(names)))
+        ax.set_xticklabels([n.replace(" (", "\n(") for n in names], fontsize=7.5)
         ax.set_title(title, fontsize=11, fontweight="bold")
         ax.grid(axis="y", linestyle="--", alpha=0.5)
-
-        # Pad y-axis limits by 18% so text labels never hit the border or x-axis labels
         if min(means) < 0:
-            lowest_point = min(m - s for m, s in zip(means, stds))
-            ax.set_ylim(lowest_point * 1.18, 0)
-            span = abs(lowest_point)
+            low = min(m - s for m, s in zip(means, stds)); ax.set_ylim(low * 1.18, 0); span = abs(low)
         else:
-            highest_point = max(m + s for m, s in zip(means, stds))
-            ax.set_ylim(0, highest_point * 1.18)
-            span = highest_point
-
-        # Place label cleanly beyond the error bar tip (mean +/- std)
+            high = max(m + s for m, s in zip(means, stds)); ax.set_ylim(0, high * 1.18); span = high
         for bar, mean, std in zip(bars, means, stds):
-            if mean < 0:
-                y_pos = (mean - std) - (0.03 * span)
-                va_align = "top"
-            else:
-                y_pos = (mean + std) + (0.02 * span)
-                va_align = "bottom"
-
-            ax.text(
-                bar.get_x() + bar.get_width() / 2.0,
-                y_pos,
-                f"{mean:.1f}",
-                ha="center",
-                va=va_align,
-                fontweight="bold",
-                fontsize=9.5,
-            )
-
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
-    bar_path = "results/benchmark_comparison.png"
-    plt.savefig(bar_path)
-    plt.close()
-    print(f"Saved bar chart to {bar_path}")
-
-    # --- Plot 2: Single-Episode Time-Series Trace ---
-    fig, axes = plt.subplots(3, 1, figsize=(12, 8), sharex=True, dpi=300)
-    fig.suptitle("Real-Time Protocol Behavior Over a 200-Step Network Trace", fontsize=14, fontweight="bold")
-
+            y = (mean - std) - 0.03 * span if mean < 0 else (mean + std) + 0.02 * span
+            ax.text(bar.get_x() + bar.get_width() / 2, y, f"{mean:.1f}", ha="center",
+                    va="top" if mean < 0 else "bottom", fontweight="bold", fontsize=9)
+    plt.tight_layout(rect=[0, 0, 1, 0.95]); plt.savefig("results/benchmark_comparison.png"); plt.close()
+    print("Saved results/benchmark_comparison.png")
+ 
+    fig, axes = plt.subplots(4, 1, figsize=(12, 10), sharex=True, dpi=300)
+    fig.suptitle(f"Behaviour over one 200-step network trace (seed {TRACE_SEED})",
+                 fontsize=14, fontweight="bold")
     for name, agent, is_sb3, color in agents:
-        # Re-instantiate AIMD so internal delay resets cleanly
-        if "AIMD" in name:
-            agent = AIMDBaseline()
-        trace = collect_single_trace(agent, is_sb3=is_sb3, seed=42)
-        steps = np.arange(1, len(trace["rtt"]) + 1)
-
-        axes[0].plot(steps, trace["rtt"], label=name, color=color, linewidth=1.8)
-        axes[1].plot(steps, trace["loss"], label=name, color=color, linewidth=1.8)
-        axes[2].plot(steps, trace["fps"], label=name, color=color, linewidth=1.8)
-
-    axes[0].set_ylabel("RTT Latency (ms)", fontweight="bold")
-    axes[0].legend(loc="upper right", frameon=True, facecolor="white", framealpha=0.9)
-    axes[0].grid(True, linestyle="--", alpha=0.5)
-
-    axes[1].set_ylabel("Effective Loss (%)", fontweight="bold")
-    axes[1].grid(True, linestyle="--", alpha=0.5)
-
-    axes[2].set_ylabel("Render FPS", fontweight="bold")
-    axes[2].set_xlabel("Simulation Step (100ms ticks)", fontweight="bold")
-    axes[2].grid(True, linestyle="--", alpha=0.5)
-
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
-    trace_path = "results/episode_timeseries.png"
-    plt.savefig(trace_path)
-    plt.close()
-    print(f"Saved time-series trace to {trace_path}")
-
+        tr = collect_single_trace(agent, is_sb3)
+        x = np.arange(1, len(tr["rtt"]) + 1)
+        axes[0].plot(x, tr["rtt"], label=name, color=color, linewidth=1.6)
+        axes[1].plot(x, tr["loss"], color=color, linewidth=1.6)
+        axes[2].plot(x, tr["fps"], color=color, linewidth=1.6)
+        axes[3].plot(x, tr["fec"], color=color, linewidth=1.6)
+    for ax, lab in zip(axes, ["RTT (ms)", "Effective loss (%)", "Render FPS", "FEC chosen (%)"]):
+        ax.set_ylabel(lab, fontweight="bold"); ax.grid(True, linestyle="--", alpha=0.5)
+    axes[0].legend(loc="upper right", fontsize=7, framealpha=0.9)
+    axes[3].set_xlabel("Simulation step (100 ms ticks)", fontweight="bold")
+    plt.tight_layout(rect=[0, 0, 1, 0.96]); plt.savefig("results/episode_timeseries.png"); plt.close()
+    print("Saved results/episode_timeseries.png")
+ 
+    plot_learning_curves()
+ 
+ 
 if __name__ == "__main__":
     main()
