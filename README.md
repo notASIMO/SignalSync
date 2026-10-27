@@ -1,60 +1,73 @@
-![SignalSync Live Telemetry Demo](results/signalsync_demo_final.gif)
+# 🌐 SignalSync RL
 
-# 📡 SignalSync: RL-Based Adaptive Packet Pacing
-**Target:** AI Assignment 2 (Mini Project) | **Status:** Active Development
+**Adaptive Packet Pacing & Congestion Control for Ultra-Low Latency Gaming**
 
-## 🎯 Project Goal
-To build a continuous-action Reinforcement Learning agent (PPO/SAC) that dynamically adjusts Forward Error Correction (FEC) and packet pacing to optimize ultra-low latency multiplayer gaming environments over congested, stochastic networks.
+SignalSync is a Reinforcement Learning (RL) based network controller designed to supersede traditional TCP (AIMD) and UDP (Fixed Pacing) protocols in latency-critical environments like real-time multiplayer gaming. By modeling network queue dynamics and link degradation as a continuous-action Markov Decision Process (MDP), our Proximal Policy Optimization (PPO) agent dynamically modulates Forward Error Correction (FEC) and packet pacing to eliminate bufferbloat and packet loss.
 
-## 📈 Overall Progress
-**Phase:** 5 / 7 | **Completion:** 80%
+![SignalSync Dashboard](results/signalsync_demo_final.gif)
+*The Originkit-powered live telemetry dashboard demonstrating SignalSync (PPO) preemptively deploying an FEC shield to survive a Markov congestion burst, while TCP experiences severe latency spikes and UDP suffers catastrophic bufferbloat.*
 
 ---
 
-## 🛠 Execution Plan & Task Tracker
+## ✨ Key Features
 
-### Phase 1: Foundation & Logistics (Status: 100%)
-- [x] Submit 50-word FCFS abstract.
-- [x] Initialize private GitHub repository.
-- [x] Define overarching architecture and set up this master execution plan.
+*   **PPO Agent Control:** An RL agent that actively balances queuing delay, jitter, effective packet loss, and client render FPS by manipulating FEC redundancy ratios and pacing delays in real-time.
+*   **Gilbert-Elliott Channel Model:** A hidden Markov model simulating realistic, bursty network degradation (Good vs. Bad states) to challenge the agent's recovery mechanics.
+*   **Token Bucket Queue Simulation:** Accurately mimics socket buffer dynamics, translating excess pacing into queueing delays (bufferbloat) and tail-drop packet loss.
+*   **Live Telemetry Dashboard:** A sleek, interactive web UI built with Originkit UI principles and "Thinking Orbs" visualizations. It pits the PPO agent against traditional TCP (AIMD) and UDP baselines simultaneously.
 
-### Phase 2: The Network Simulator / Gym Environment (Status: 100%)
-*This is the core of the simulation required for the bonus.*
-- [x] Define the State (`S`), Action (`A`), and Reward (`R`) mathematically in code.
-- [x] Implement the `__init__`, `reset`, and `step` functions in `network_env.py`.
-- [x] Build a "Token Bucket" pacing mechanism to simulate network socket buffers.
-- [x] Implement a Markov Chain generator to simulate bursty packet loss and jitter spikes.
-- [x] **Test:** Ensure `env.step()` runs 10,000 random actions without crashing or throwing infinite values.
+## 🚀 Installation & Setup
 
-### Phase 3: RL Agent Implementation (Status: 100%)
-- [x] Set up `stable-baselines3` integration in `train.py`.
-- [x] Implement Proximal Policy Optimization (PPO) configured for continuous action spaces.
-- [x] Set up TensorBoard logging to track reward curves, agent latency, and packet loss over time.
-- [x] Train the initial agent (baseline model).
+**1. Clone the repository**
+```bash
+git clone [https://github.com/notASIMO/SignalSync.git](https://github.com/notASIMO/SignalSync.git)
+cd SignalSync
 
-### Phase 4: Benchmarking & Baselines (Status: 100%)
-*To prove the RL agent is actually smart, we must compare it to standard protocols.*
-- [x] Write a "Naive UDP" baseline (action: always pace 0ms, FEC 0).
-- [x] Write a "Simple AIMD" baseline (Additive Increase, Multiplicative Decrease - similar to TCP Reno).
-- [x] Run evaluation scripts to compare the RL Agent vs. UDP vs. AIMD over 100 episodes.
-- [x] Write `plot_results.py` to collect statistical metrics and generate comparative plots (Latency vs. Throughput) to save to `/results/`.
+```
 
-### Phase 5: The Visualizer Demo (Status: 100%)
-*Crucial for the resume and presentation.*
-- [x] Write `simulate_gui.py` using Matplotlib to visualize the network queue in real-time.
-- [x] Add live metrics to the GUI (Current RTT, Buffer Level, Agent Action, Policy Toggle).
-- [x] Record a GIF of the RL agent successfully recovering from a network congestion spike.
-- [x] Embed the GIF in this README.
+**2. Install dependencies**
 
-### Phase 6: The Overleaf Report (Status: 0%)
-*Strict 2-page limit, two-column format.*
-- [ ] Draft Section 1: Abstract & Real-World Problem Mapping.
-- [ ] Draft Section 2: Mathematical Formulation (MDP, State, Action, Reward).
-- [ ] Draft Section 3: Environment Dynamics (How the network queue is simulated).
-- [ ] Draft Section 4: Results & Baseline Comparisons (Include TensorBoard/Matplotlib graphs from `plot_results.py`).
-- [ ] Final proofread against the plagiarism and rubric requirements.
+```bash
+pip install numpy stable-baselines3 gym Flask
 
-### Phase 7: Delivery & Final Polish (Status: 0%)
-- [ ] Clean up all Python code (remove debug prints, add docstrings).
-- [ ] Finalize `requirements.txt` and add exact run instructions to the README.
-- [ ] Ensure commit history shows clear, distributed effort from the team.
+```
+
+*(Note: PyTorch is required for stable-baselines3. See [PyTorch's website](https://pytorch.org/) for your specific system requirements).*
+
+**3. Run the Live Dashboard**
+To launch the interactive telemetry environment and evaluate the trained model:
+
+```bash
+python web_dashboard.py
+
+```
+
+Open your browser to `http://localhost:8050`.
+
+## 🧠 Environment Formulation (MDP)
+
+* **State Space ($\mathcal{S}$):** RTT Latency, Jitter, Effective Loss Rate, Socket Buffer Occupancy, Client Render FPS.
+* **Action Space ($\mathcal{A}$):**
+* `FEC Redundancy Ratio`: $[0.0, 0.5]$ (Protects against drop bursts)
+* `Pacing Delay Interval`: $[3.5, 14.0]$ ms (Controls socket ingress rate)
+
+
+* **Reward Function ($\mathcal{R}$):** Heavily penalizes latency spikes, unrecovered packet loss, and frame rate degradation, while slightly penalizing excessive FEC bandwidth overhead.
+
+## 📊 Baselines
+
+SignalSync is benchmarked against two standard network protocol approximations:
+
+1. **Fixed Pacing (UDP):** A static pacing delay with constant FEC. Highly susceptible to bufferbloat during network bursts.
+2. **AIMD Control (TCP):** Multiplicatively increases delay upon congestion and additively decreases it during healthy links. Prone to reactive "sawtooth" latency spikes and frame rate stutters.
+
+## 👥 Authors
+
+Developed as an Artificial Intelligence course project at the **Indian Institute of Technology (IIT) Jodhpur** by:
+
+* **Devang Shukla**
+* **Ansh Gupta**
+
+---
+
+*Built with Stable-Baselines3 and Python.*
