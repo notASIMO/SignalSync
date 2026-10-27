@@ -1,4 +1,4 @@
-![SignalSync Live Telemetry Demo](results/signalsync_demo.gif)
+![SignalSync Live Telemetry Demo](results/signalsync_demo_final.gif)
 
 # 📡 SignalSync: RL-Based Adaptive Packet Pacing
 **Target:** AI Assignment 2 (Mini Project) | **Status:** Active Development
